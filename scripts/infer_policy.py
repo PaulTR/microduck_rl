@@ -1043,6 +1043,7 @@ def main():
     policy_enabled = not args.record
     policy_enable_time = None
     original_kp = None
+    speed_multiplier = 1.0
     if args.record:
         original_kp = model.actuator_gainprm[:, 0].copy()
 
@@ -1187,8 +1188,15 @@ def main():
                     policy.head_offset[0] = np.clip(policy.head_offset[0] - policy.head_step, -policy.head_max, policy.head_max)
                     policy._update_command()
                     print(f"Head offset: neck={policy.head_offset[0]:.2f} pitch={policy.head_offset[1]:.2f} yaw={policy.head_offset[2]:.2f} roll={policy.head_offset[3]:.2f}")
-                elif policy.body_pose_mode and policy.new_cmd_obs:
-                    policy.bump_body("yaw", -policy.body_cmd_step_angle)
+            elif key in ("+", "=", "]"):
+                speed_multiplier = min(speed_multiplier * 2.0, 32.0)
+                print(f"Playback speed: {speed_multiplier:.2f}x")
+            elif key in ("-", "_", "["):
+                speed_multiplier = max(speed_multiplier / 2.0, 0.0625)
+                print(f"Playback speed: {speed_multiplier:.2f}x")
+            elif key == "0":
+                speed_multiplier = 1.0
+                print(f"Playback speed: 1.00x (reset)")
         except Exception as e:
             print(f"Key press error: {e}")
 
@@ -1203,6 +1211,8 @@ def main():
         print("  LEFT/RIGHT arrow: strafe left/right (lin_vel_y)")
         print("  A / E:            turn left/right (ang_vel_z)")
     print("  SPACE:            coast (zero all commands)")
+    print("  + / -  or  ] / [: speed up / slow down playback (e.g. 2x, 4x, 0.5x)")
+    print("  0:                reset playback speed to 1.0x")
     print("  T:                toggle policy inference on/off (paused = motors hold last target)")
     print("  G:                trigger ground pick (requires --ground-pick)")
     print("  Y:                toggle sit (with --sit/--sitstand) or slope mode (with --slope)")
@@ -1358,7 +1368,8 @@ def main():
                 viewer.sync()
 
                 elapsed = time.time() - step_start
-                sleep_time = control_dt - elapsed
+                target_dt = control_dt / max(speed_multiplier, 1e-4)
+                sleep_time = target_dt - elapsed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
