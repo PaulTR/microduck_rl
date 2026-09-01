@@ -1335,3 +1335,65 @@ Now, bopping earns nothing after the first 0.3s, and genuine vertical jumps to $
 
 ---
 
+## User
+
+now it just stands there maxing out heading anchor and head pose tracking. 0 on the jump rewards
+
+---
+
+## Assistant
+
+### The Diagnosis: The "Passive Standing Salary" Trap
+
+Look at what you observed:
+> *"it just stands there maxing out heading anchor and head pose tracking. 0 on the jump rewards"*
+
+You spotted the exact economic barrier preventing exploration!
+
+---
+
+### Why the AI Refused to Jump:
+
+When we inherited from the base velocity recipe, several passive tracking rewards remained active:
+* `head_pose_tracking`: **`+2.0` / step** (because the head is already in default posture at spawn)
+* `heading_anchor`: **`+2.0` / step** (because the robot hasn't turned away from spawn)
+* `leg_symmetry`: **`+1.5` / step** (because both legs start in symmetric HOME pose)
+* `upright`: **`+1.0` / step**
+
+$$\text{Passive Income} = (2.0 + 2.0 + 1.5 + 1.0) \times 60\text{ steps} = \mathbf{390\text{ guaranteed points}}$$
+
+**The AI's Calculus:**
+Why risk crouching, coiling, and jumping into the air (which shakes the head, risks dropping the heading anchor, and risks falling over) when **standing 100% motionless pays 390 points with zero risk?**
+
+---
+
+### The Fix Applied (Commit `9ebbb06` on `paul/jump`):
+
+1. **Deleted `head_pose_tracking` & `head_pose_bias`:**
+   * Jumping is a whole-body dynamic trick; head tracking should not be paying a passive salary.
+2. **Reduced Auxiliary Stabilizers to Trace Weights:**
+   * `heading_anchor`: $2.0 \to \mathbf{0.2}$
+   * `leg_symmetry`: $1.5 \to \mathbf{0.2}$
+   * `upright`: $1.0 \to \mathbf{0.2}$
+   * **Result:** Total passive standing reward collapsed from **$390\text{ points} \to \mathbf{36\text{ points}}$**.
+3. **Massively Boosted the Jump Task Stack (Dominant Reward Mass):**
+   * `jump_launch` (explosive push-off): $5.0 \to \mathbf{10.0}$
+   * `jump_air_time` (flight): $8.0 \to \mathbf{15.0}$
+   * `jump_height` (peak progress): $6.0 \to \mathbf{15.0}$
+   * `jump_landing` (sticking landing): $3.0 \to \mathbf{5.0}$
+   * **Result:** A successful jump now pays $\mathbf{\approx 300\text{ to }400\text{ points}}$ (over **$10\times$ higher** than standing still).
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+With the standing salary removed, the algorithm's only viable path to reward is to launch into the air!
+
+---
+
