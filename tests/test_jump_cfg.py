@@ -31,7 +31,7 @@ def test_jump_rewards_present_and_signs():
 
     assert "jump_height" in cfg.rewards
     assert cfg.rewards["jump_height"].weight > 0.0
-    assert cfg.rewards["jump_height"].params["target_height"] == JUMP_TARGET_APEX_Z
+    assert cfg.rewards["jump_height"].params["target_apex_height"] == JUMP_TARGET_APEX_Z
 
     assert "jump_landing" in cfg.rewards
     assert cfg.rewards["jump_landing"].weight > 0.0
