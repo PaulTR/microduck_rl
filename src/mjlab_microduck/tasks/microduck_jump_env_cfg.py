@@ -92,7 +92,8 @@ def make_microduck_jump_env_cfg(
 
     cfg.episode_length_s = EPISODE_LENGTH_S
 
-    # ── Drop walking-specific locomotion rewards ──────────────────────────────
+    # ── Drop walking & passive tracking rewards ───────────────────────────────
+    # Standing still must not earn an annuity from unused tracking tasks.
     for name in [
         "track_linear_velocity",
         "track_angular_velocity",
@@ -101,29 +102,33 @@ def make_microduck_jump_env_cfg(
         "foot_slip",
         "air_time",
         "pose",
+        "head_pose_tracking",
+        "head_pose_bias",
+        "body_pose_tracking",
     ]:
         if name in cfg.rewards:
             del cfg.rewards[name]
 
-    # ── Tune general posture & smoothness stabilizers ─────────────────────────
-    # Upright reward to keep torso vertical (weight 1.0 allows slight lean for launch)
+    # ── Tune general posture & smoothness stabilizers (keep LOW during skill discovery)
+    # Low weights ensure "standing still" does NOT beat attempting the jump.
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 1.0
+        cfg.rewards["upright"].weight = 0.2
         cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
 
-    # Damping roll/pitch angular wobble
     if "body_ang_vel" in cfg.rewards:
-        cfg.rewards["body_ang_vel"].weight = -0.05
+        cfg.rewards["body_ang_vel"].weight = -0.02
 
-    # Action smoothness (damp high-frequency servo jitter without blocking big launch)
+    if "angular_momentum" in cfg.rewards:
+        cfg.rewards["angular_momentum"].weight = -0.01
+
     if "action_rate_l2" in cfg.rewards:
-        cfg.rewards["action_rate_l2"].weight = -0.1
+        cfg.rewards["action_rate_l2"].weight = -0.05
 
-    # ── Add Jump Task Rewards ─────────────────────────────────────────────────
+    # ── Add Jump Task Rewards (Dominant Mass) ──────────────────────────────────
     # 1. Initial explosive upward push-off velocity near the floor (first 0.35s only)
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
-        weight=5.0,
+        weight=10.0,
         params={
             "max_height": 0.135,
             "max_step": 18,
@@ -134,7 +139,7 @@ def make_microduck_jump_env_cfg(
     # 2. Airborne reward: both feet fully in the air while upright
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
-        weight=8.0,
+        weight=15.0,
         params={
             "sensor_name": "feet_ground_contact",
             "min_height": 0.125,
@@ -145,7 +150,7 @@ def make_microduck_jump_env_cfg(
     # 3. Peak height progress: potential-based reward paying for every mm gained
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_peak_height_progress,
-        weight=6.0,
+        weight=15.0,
         params={
             "target_apex_height": JUMP_TARGET_APEX_Z,
             "stand_z": STAND_Z,
@@ -156,7 +161,7 @@ def make_microduck_jump_env_cfg(
     # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.130m)
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
-        weight=3.0,
+        weight=5.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
@@ -179,17 +184,17 @@ def make_microduck_jump_env_cfg(
         weight=-1.0,
     )
 
-    # 7. Heading anchor: reward maintaining initial spawn orientation (anti-drift)
+    # 7. Heading anchor: small guidance reward to keep initial spawn heading
     cfg.rewards["heading_anchor"] = RewardTermCfg(
         func=microduck_mdp.heading_hold_reward,
-        weight=2.0,
+        weight=0.2,
         params={"std": 0.25},
     )
 
     # 8. Bilateral leg symmetry: enforce identical mirrored left/right push-off
     cfg.rewards["leg_symmetry"] = RewardTermCfg(
         func=microduck_mdp.leg_symmetry_reward,
-        weight=1.5,
+        weight=0.2,
     )
 
     # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force

@@ -68,6 +68,9 @@ def test_walking_rewards_dropped():
         "foot_slip",
         "air_time",
         "pose",
+        "head_pose_tracking",
+        "head_pose_bias",
+        "body_pose_tracking",
     ]:
         assert walking_term not in cfg.rewards, f"Unexpected walking term {walking_term} found in jump rewards"
 
