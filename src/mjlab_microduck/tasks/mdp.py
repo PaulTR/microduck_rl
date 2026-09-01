@@ -7186,3 +7186,169 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ==============================================================================
+# Jump / Hop task — episodic dynamic vertical maneuver
+# ==============================================================================
+#
+# Microduck Jump Mechanics:
+#   1. Squat / Crouch: CoM lowers slightly to compress legs for upward thrust.
+#   2. Explosive Push-off: Positive upward velocity vz > 0 while feet push off ground.
+#   3. Flight Phase: Both feet break ground contact (feet_ground_contact found == 0),
+#      torso reaches apex height while remaining upright (tilt penalty).
+#   4. Landing & Stabilization: Touchdown absorption and recovery to stable HOME
+#      standing posture.
+#
+# Reward Structure:
+#   - jump_air_time_reward: Rewards both feet in the air while trunk is upright (positive).
+#   - jump_height_target: Gaussian targeting apex height (e.g. 0.16m vs standing 0.115m).
+#   - jump_launch_velocity: Encourages initial upward acceleration while near ground.
+#   - jump_landing_composite: Multiplicative standing attractor for clean recovery.
+#   - jump_lateral_drift_penalty: Penalizes horizontal velocity vx^2 + vy^2 to keep jump vertical.
+#   - jump_foot_impact_penalty: Penalizes extreme touchdown contact forces.
+
+
+def jump_air_time_reward(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    min_height: float = 0.125,
+    upright_std: float = 0.25,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward for being airborne with an upright torso.
+
+    Checks:
+      1. Both feet are off the ground (contact found == 0 for both feet).
+      2. Torso z-height > min_height (above resting standing height ~0.115 m).
+      3. Torso is upright (Gaussian penalty on tilt).
+
+    Returns a value in [0, 1]. Positive weight in config.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    found = env.scene.sensors[sensor_name].data.found
+    both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1).float()
+
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    height_gate = (z > min_height).float()
+
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    upright_score = torch.exp(-tilt_sq / (upright_std * upright_std))
+
+    return both_feet_airborne * height_gate * upright_score
+
+
+def jump_height_target(
+    env: ManagerBasedRlEnv,
+    target_height: float = 0.16,
+    height_std: float = 0.025,
+    upright_std: float = 0.25,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Gaussian reward for reaching apex height while upright.
+
+    Returns exp(-((z - target_height)/height_std)^2) * exp(-tilt_sq / upright_std^2).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    height_g = torch.exp(-((z - target_height) / height_std) ** 2)
+
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
+
+    return height_g * upright_g
+
+
+def jump_launch_velocity(
+    env: ManagerBasedRlEnv,
+    max_height: float = 0.13,
+    upright_std: float = 0.3,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward positive upward vertical velocity vz while near the ground.
+
+    Active only while the trunk is below max_height (during the thrust phase)
+    so it encourages explosive takeoff without rewarding falling downward.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    upward_vz = torch.clamp(vz, min=0.0)
+
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
+
+    return upward_vz * (z < max_height).float() * upright_g
+
+
+def jump_landing_composite(
+    env: ManagerBasedRlEnv,
+    target_height: float = 0.115,
+    height_std: float = 0.02,
+    upright_std: float = 0.25,
+    pose_std: float = 0.3,
+    joint_indices: list = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Standing composite score to stabilize the robot upright in HOME pose upon landing.
+
+    Multiplies height_score * upright_score * pose_score so the policy is
+    strongly attracted to stable standing after the jump.
+    """
+    if joint_indices is None:
+        joint_indices = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]  # leg joints
+    return standing_composite_score(
+        env,
+        target_height=target_height,
+        height_std=height_std,
+        upright_std=upright_std,
+        pose_std=pose_std,
+        joint_indices=joint_indices,
+        asset_cfg=asset_cfg,
+    )
+
+
+def jump_lateral_drift_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize horizontal base velocity (vx^2 + vy^2) to keep the jump strictly vertical.
+
+    Returns >= 0 (use a negative weight in the config).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    lin_vel_b = asset.data.root_link_lin_vel_b
+    return torch.nan_to_num(lin_vel_b[:, 0].pow(2) + lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+def jump_foot_impact_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    force_threshold: float = 25.0,
+) -> torch.Tensor:
+    """Penalize excessive landing impact forces on the feet.
+
+    Returns >= 0 (use a negative weight in the config).
+    Protects Dynamixel XL330 gears and 3D-printed ankle brackets.
+    """
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    forces = sensor.data.force
+    force_mag = torch.norm(forces, dim=-1)
+    max_foot_force = force_mag.max(dim=-1).values
+    excess = torch.clamp(max_foot_force - force_threshold, min=0.0)
+    return excess
+
