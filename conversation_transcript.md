@@ -1227,3 +1227,52 @@ You can view, copy, or commit this file directly in your workspace.
 
 ---
 
+## User
+
+ok running through training again and on step 750. it's just stepping forward again. jump drift penalty is -0.0018, jump yaw rate is -0.15, foot impact -0.0004, air time 0.04, height 0.3, jump landing 1.0
+
+---
+
+## Assistant
+
+### Why It Was Stepping Forward (and How We Fixed It)
+
+Your observation exposed two subtle reward dynamics:
+
+1. **The Step-Shuffle Latch Trigger:**
+   * Standing height is $0.115\text{ m}$. Previously, the airborne latch checked for $z > 0.125\text{ m}$ (only 1 cm above standing!).
+   * When taking a small step forward, the robot would briefly lift one foot, extend slightly, and if both feet lost ground contact for just a single 20ms physics tick, the latch would trigger `True` for the rest of the episode.
+   * Once triggered, the robot would immediately plant its feet and collect the landing reward for the rest of the 2-second episode.
+2. **Weak Horizontal Drift Tax:**
+   * The drift penalty weight was only `-0.5`, so moving forward at $0.05\text{ m/s}$ only cost $\sim 0.0018$ points—completely negligible compared to the positive landing points.
+
+---
+
+### Key Improvements Applied (Commit `0bb8033` on `paul/jump`):
+
+1. **Strict Airborne Threshold ($z \ge 0.145\text{ m}$):**
+   * The latch now requires trunk height $z \ge 0.145\text{ m}$ (at least **30 mm off the ground**) with both feet in the air and upright orientation.
+   * A walking step or forward shuffle can never reach $0.145\text{ m}$, so **stepping forward now earns $0.00$ landing points**.
+2. **Potential-Based Peak Height Progress (`jump_peak_height_progress`, weight `5.0`):**
+   * Instead of a per-step Gaussian, the reward tracks the maximum height reached this episode:
+     $$\text{Reward} = \frac{\Delta z_{\text{new\_peak}}}{0.160\text{ m} - 0.115\text{ m}}$$
+   * Every millimeter the robot pushes upward is paid instantly. A 2mm step pays almost nothing once; an explosive leap to $0.160\text{ m}$ earns the entire jackpot!
+3. **Heavy Horizontal Drift Penalty (Weight `-2.0`):**
+   * Quadrupled the penalty on $v_x^2 + v_y^2$. Moving or stepping forward is now heavily penalized.
+4. **Tighter Episode Window (`EPISODE_LENGTH_S = 1.2` s):**
+   * Shortened from 2.0s to 1.2s (60 steps). This creates the ideal ratio for squat (0.3s) $\to$ launch & flight (0.2s) $\to$ landing (0.7s), preventing the landing phase from overpowering the flight incentive.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+The only way the AI can unlock points now is with a genuine vertical explosion off both feet!
+
+---
+
