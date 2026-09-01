@@ -1276,3 +1276,62 @@ The only way the AI can unlock points now is with a genuine vertical explosion o
 
 ---
 
+## User
+
+ok now its not spinning, but also not jumping. it kind of bends its legs and bops up and down. i have 0 across the board for jump air time, jump height, and jump landing and jump launch is 0.25.
+
+---
+
+## Assistant
+
+### Why It Was "Bopping Up and Down" (and the Physical Target Fix)
+
+The observation you made ("bends legs and bops up and down, launch is 0.25, everything else 0") directly revealed two root causes:
+
+---
+
+### 1. The Target Height ($0.160\text{ m}$) Was Physically Unreachable
+* **Physical Anatomy of Microduck:** 
+  * Natural standing equilibrium is $\mathbf{z = 0.115\text{ m}}$.
+  * When Microduck fully straightens its legs with feet on the ground, its maximum trunk height is $\approx \mathbf{0.140\text{ m} - 0.145\text{ m}}$.
+  * With Dynamixel XL330 servos, an explosive jump lifts the robot about **$2.5\text{ to }3.5\text{ cm}$** into the air, reaching an apex of $\approx \mathbf{0.145\text{ m}}$.
+* **The Problem:** 
+  * Because `min_airborne_height` was set to $0.145\text{ m}$ and apex to $0.160\text{ m}$, pushing hard and getting into the air (e.g. reaching $0.140\text{ m}$) awarded **$0.00$** for apex, **$0.00$** for air time, and locked the landing reward.
+
+---
+
+### 2. Launch Reward Was Paying for Continuous Bouncing
+* `jump_launch_velocity` was rewarding $v_z > 0$ on *every timestep* below $0.135\text{ m}$.
+* When the robot discovered the $0.160\text{ m}$ goal was too far, it learned a loophole: **squat down and push up repeatedly**. 
+* Each upward stroke earned a free `0.25` launch reward without ever risking flight!
+
+---
+
+### What We Changed (Commit `2b9ad54` on `paul/jump`):
+
+1. **Realistic, Reachable Physical Targets:**
+   * Target Apex Height: **$0.145\text{ m}$** ($+30\text{ mm}$ jump above $0.115\text{ m}$ standing).
+   * Latch Airborne Threshold: **$0.130\text{ m}$** ($+15\text{ mm}$ lift with both feet off the ground).
+   * Air Time Threshold: **$0.125\text{ m}$** (pays anytime both feet break contact).
+2. **Launch Reward Restricted to Initial Takeoff:**
+   * `jump_launch_velocity` now has `max_step = 18` (only the first **$0.35\text{ seconds}$**).
+   * Continuous bouncing or bopping after $t > 0.35\text{ s}$ now pays **$0.00$**.
+3. **Flight Rewards Massively Boosted:**
+   * `jump_air_time`: Weight boosted to **`8.0`**
+   * `jump_height` (potential-based peak progress): Weight boosted to **`6.0`**
+   * `jump_landing`: Weight **`3.0`**
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+Now, bopping earns nothing after the first 0.3s, and genuine vertical jumps to $0.140\text{--}0.145\text{ m}$ will instantly collect huge rewards for air time, peak height, and landing!
+
+---
+
