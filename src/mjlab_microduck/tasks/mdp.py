@@ -7203,8 +7203,9 @@ def roulade_lateral_velocity_penalty(
 # Latch & Progress Accounting:
 #   - env._jump_max_z: tracks peak height reached this episode (potential-based).
 #   - env._jump_airborne_latch: flips True ONLY when both feet are off ground AND
-#     trunk z reaches >= 0.145m (at least 3cm off ground) with upright torso.
-#   - jump_landing_composite: strictly 0.0 until the 0.145m airborne latch is earned.
+#     trunk z reaches >= 0.130m (with upright torso).
+#   - jump_launch_velocity: gated on step <= max_step (initial thrust only; prevents bopping).
+#   - jump_landing_composite: strictly 0.0 until the 0.130m airborne latch is earned.
 
 
 def _jump_state(env: ManagerBasedRlEnv, stand_z: float = 0.115) -> tuple:
@@ -7218,7 +7219,7 @@ def _jump_state(env: ManagerBasedRlEnv, stand_z: float = 0.115) -> tuple:
 def _update_jump_state(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    min_airborne_height: float = 0.145,
+    min_airborne_height: float = 0.130,
     stand_z: float = 0.115,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
@@ -7270,7 +7271,7 @@ def reset_jump_state(
 
 def jump_peak_height_progress(
     env: ManagerBasedRlEnv,
-    target_apex_height: float = 0.160,
+    target_apex_height: float = 0.145,
     stand_z: float = 0.115,
     upright_std: float = 0.25,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -7305,7 +7306,7 @@ def jump_peak_height_progress(
 def jump_air_time_reward(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    min_height: float = 0.130,
+    min_height: float = 0.125,
     upright_std: float = 0.25,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7332,11 +7333,13 @@ def jump_air_time_reward(
 def jump_launch_velocity(
     env: ManagerBasedRlEnv,
     max_height: float = 0.135,
+    max_step: int = 18,
     upright_std: float = 0.3,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward positive upward vertical velocity vz while near the ground."""
+    """Reward positive upward vertical velocity vz during the initial launch phase (first ~0.35s)."""
     asset: Entity = env.scene[asset_cfg.name]
+    step_gate = (env.episode_length_buf <= max_step).float()
     z = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
     )
@@ -7347,7 +7350,7 @@ def jump_launch_velocity(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return upward_vz * (z < max_height).float() * upright_g
+    return upward_vz * (z < max_height).float() * step_gate * upright_g
 
 
 def jump_landing_composite(
@@ -7363,7 +7366,7 @@ def jump_landing_composite(
     """Standing composite score to stabilize the robot in HOME pose upon landing.
 
     Gated by default on require_airborne_latch=True:
-    If the robot has NOT jumped to >= 0.145m yet, this returns ZERO!
+    If the robot has NOT jumped to >= 0.130m yet, this returns ZERO!
     """
     _update_jump_state(env, stand_z=target_height, asset_cfg=asset_cfg)
     if joint_indices is None:
