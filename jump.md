@@ -98,10 +98,20 @@ This creates an ONNX binary (e.g. `microduck_jump.onnx`).
 
 ## 7. CPU Deployment Rehearsal
 
-Test the exported ONNX model on your local CPU before copying it to the physical robot's onboard computer:
+Test the exported ONNX model on your local CPU (including your Mac!) before copying it to the physical robot's onboard computer.
+
+### Option A: Trigger Jump as a hot-swapped trick (with Walking or Standing base)
+Load your walking or standing policy alongside the jump policy. Press **`J`** in the terminal window to trigger the jump maneuver in real-time:
 
 ```bash
-uv run scripts/infer_policy.py --walking out.onnx
+uv run scripts/infer_policy.py --standing <standing.onnx> --jump <jump.onnx> --new-cmd-obs
+```
+
+### Option B: Run Jump policy continuously
+Run the jump policy directly in the primary slot:
+
+```bash
+uv run scripts/infer_policy.py --walking <jump.onnx> --new-cmd-obs
 ```
 
 ---
