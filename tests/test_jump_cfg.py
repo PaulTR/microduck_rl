@@ -110,3 +110,13 @@ def test_landing_is_gated_on_airborne_latch():
     assert cfg.rewards["jump_landing"].params["require_airborne_latch"] is True
     assert "reset_jump_state" in cfg.events
 
+
+def test_curricula_clean():
+    """Verify that curricula do not reference deleted reward terms."""
+    cfg = make_microduck_jump_env_cfg()
+    assert "head_pose_bias_weight" not in cfg.curriculum
+    assert "standing_envs" not in cfg.curriculum
+    assert "head_pose_range" not in cfg.curriculum
+    assert "body_pose_range" not in cfg.curriculum
+
+

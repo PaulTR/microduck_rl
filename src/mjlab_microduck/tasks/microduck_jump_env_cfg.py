@@ -109,6 +109,17 @@ def make_microduck_jump_env_cfg(
         if name in cfg.rewards:
             del cfg.rewards[name]
 
+    # ── Drop walking & pose curricula inherited from velocity ─────────────────
+    for name in [
+        "head_pose_bias_weight",
+        "standing_envs",
+        "head_pose_range",
+        "body_pose_range",
+        "action_rate_weight",
+    ]:
+        if name in cfg.curriculum:
+            del cfg.curriculum[name]
+
     # ── Tune general posture & smoothness stabilizers (keep LOW during skill discovery)
     # Low weights ensure "standing still" does NOT beat attempting the jump.
     if "upright" in cfg.rewards:
