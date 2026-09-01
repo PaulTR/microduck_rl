@@ -7412,3 +7412,17 @@ def jump_foot_impact_penalty(
     return excess
 
 
+def jump_yaw_rate_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize torso yaw angular velocity (omega_z^2) to prevent spinning in place.
+
+    Returns >= 0 (use a negative weight in the config).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    omega_b = asset.data.root_link_ang_vel_b
+    return torch.nan_to_num(omega_b[:, 2].pow(2), nan=0.0)
+
+
+

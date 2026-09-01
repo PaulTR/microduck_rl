@@ -37,9 +37,18 @@ def test_jump_rewards_present_and_signs():
     assert cfg.rewards["jump_landing"].weight > 0.0
     assert cfg.rewards["jump_landing"].params["target_height"] == STAND_Z
 
+    assert "heading_anchor" in cfg.rewards
+    assert cfg.rewards["heading_anchor"].weight > 0.0
+
+    assert "leg_symmetry" in cfg.rewards
+    assert cfg.rewards["leg_symmetry"].weight > 0.0
+
     # Negative penalty / cost terms
     assert "jump_drift_penalty" in cfg.rewards
     assert cfg.rewards["jump_drift_penalty"].weight < 0.0
+
+    assert "jump_yaw_rate" in cfg.rewards
+    assert cfg.rewards["jump_yaw_rate"].weight < 0.0
 
     assert "jump_foot_impact" in cfg.rewards
     assert cfg.rewards["jump_foot_impact"].weight < 0.0

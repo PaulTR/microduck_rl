@@ -20,8 +20,8 @@ Key design points:
 import math
 from copy import deepcopy
 
-# Left/Right symmetry can be enabled if desired (symmetric task). Left OFF by default.
-ENABLE_SYMMETRY = False
+# Left/Right symmetry enabled to ensure bilateral symmetric push-off
+ENABLE_SYMMETRY = True
 
 # ── Domain randomisation (matched to velocity / standup for sim2real parity) ───
 ENABLE_COM_RANDOMIZATION             = True
@@ -172,7 +172,26 @@ def make_microduck_jump_env_cfg(
         weight=-0.5,
     )
 
-    # 6. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 6. Yaw spin rate penalty: strictly penalize clockwise/counter-clockwise rotation
+    cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
+        func=microduck_mdp.jump_yaw_rate_penalty,
+        weight=-1.0,
+    )
+
+    # 7. Heading anchor: reward maintaining initial spawn orientation (anti-drift)
+    cfg.rewards["heading_anchor"] = RewardTermCfg(
+        func=microduck_mdp.heading_hold_reward,
+        weight=2.0,
+        params={"std": 0.25},
+    )
+
+    # 8. Bilateral leg symmetry: enforce identical mirrored left/right push-off
+    cfg.rewards["leg_symmetry"] = RewardTermCfg(
+        func=microduck_mdp.leg_symmetry_reward,
+        weight=1.5,
+    )
+
+    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,
