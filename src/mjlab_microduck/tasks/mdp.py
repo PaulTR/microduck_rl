@@ -7196,17 +7196,69 @@ def roulade_lateral_velocity_penalty(
 #   1. Squat / Crouch: CoM lowers slightly to compress legs for upward thrust.
 #   2. Explosive Push-off: Positive upward velocity vz > 0 while feet push off ground.
 #   3. Flight Phase: Both feet break ground contact (feet_ground_contact found == 0),
-#      torso reaches apex height while remaining upright (tilt penalty).
-#   4. Landing & Stabilization: Touchdown absorption and recovery to stable HOME
-#      standing posture.
+#      torso reaches apex height while remaining upright.
+#   4. Landing & Stabilization: Gated on having achieved flight (airborne latch).
+#      Touchdown absorption and recovery to stable HOME standing posture.
 #
-# Reward Structure:
-#   - jump_air_time_reward: Rewards both feet in the air while trunk is upright (positive).
-#   - jump_height_target: Gaussian targeting apex height (e.g. 0.16m vs standing 0.115m).
-#   - jump_launch_velocity: Encourages initial upward acceleration while near ground.
-#   - jump_landing_composite: Multiplicative standing attractor for clean recovery.
-#   - jump_lateral_drift_penalty: Penalizes horizontal velocity vx^2 + vy^2 to keep jump vertical.
-#   - jump_foot_impact_penalty: Penalizes extreme touchdown contact forces.
+# Latch Accounting:
+#   - env._jump_airborne_latch: initialized False at reset. Flips True when both
+#     feet break contact with z > 0.125m and upright orientation.
+#   - jump_landing_composite: multiplies score by _jump_airborne_latch so standing
+#     still at spawn earns $0.00 landing reward. Only jumping unlocks the landing annuity.
+
+
+def _jump_state(env: ManagerBasedRlEnv) -> torch.Tensor:
+    if not hasattr(env, "_jump_airborne_latch"):
+        env._jump_airborne_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._jump_last_update_step = -1
+    return env._jump_airborne_latch
+
+
+def _update_jump_state(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    min_airborne_height: float = 0.125,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Check if the robot has achieved flight and latch the airborne flag."""
+    _jump_state(env)
+    step = int(env.common_step_counter)
+    if step != env._jump_last_update_step:
+        asset: Entity = env.scene[asset_cfg.name]
+        # Check both feet off ground
+        if sensor_name in env.scene.sensors:
+            found = env.scene.sensors[sensor_name].data.found
+            both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
+        else:
+            both_feet_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+        # Check trunk height > min_airborne_height
+        z = torch.nan_to_num(
+            asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+        )
+        height_ok = z > min_airborne_height
+
+        # Check orientation upright (not fallen, tilt < ~30 deg)
+        quat = asset.data.root_link_quat_w
+        tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+        upright_ok = tilt_sq < 0.25
+
+        # Latch: once airborne, it stays True for the rest of the episode
+        is_airborne_now = both_feet_airborne & height_ok & upright_ok
+        env._jump_airborne_latch = env._jump_airborne_latch | is_airborne_now
+        env._jump_last_update_step = step
+
+
+def reset_jump_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+) -> None:
+    """Reset the jump airborne latch on episode reset."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    _jump_state(env)
+    env._jump_airborne_latch[env_ids] = False
+    env._jump_last_update_step = -1
 
 
 def jump_air_time_reward(
@@ -7270,7 +7322,7 @@ def jump_height_target(
 
 def jump_launch_velocity(
     env: ManagerBasedRlEnv,
-    max_height: float = 0.13,
+    max_height: float = 0.135,
     upright_std: float = 0.3,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7300,16 +7352,20 @@ def jump_landing_composite(
     upright_std: float = 0.25,
     pose_std: float = 0.3,
     joint_indices: list = None,
+    require_airborne_latch: bool = True,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Standing composite score to stabilize the robot upright in HOME pose upon landing.
 
-    Multiplies height_score * upright_score * pose_score so the policy is
-    strongly attracted to stable standing after the jump.
+    Gated by default on require_airborne_latch=True:
+    If the robot has NOT jumped yet, this returns ZERO!
+    Only after achieving flight (airborne latch == True) does this reward turn on.
     """
+    _update_jump_state(env, asset_cfg=asset_cfg)
     if joint_indices is None:
         joint_indices = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]  # leg joints
-    return standing_composite_score(
+
+    score = standing_composite_score(
         env,
         target_height=target_height,
         height_std=height_std,
@@ -7318,6 +7374,9 @@ def jump_landing_composite(
         joint_indices=joint_indices,
         asset_cfg=asset_cfg,
     )
+    if require_airborne_latch:
+        score = score * env._jump_airborne_latch.float()
+    return score
 
 
 def jump_lateral_drift_penalty(
@@ -7351,4 +7410,5 @@ def jump_foot_impact_penalty(
     max_foot_force = force_mag.max(dim=-1).values
     excess = torch.clamp(max_foot_force - force_threshold, min=0.0)
     return excess
+
 

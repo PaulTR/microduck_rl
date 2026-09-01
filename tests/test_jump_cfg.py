@@ -90,3 +90,11 @@ def test_jump_task_registered():
     tasks = list_tasks()
     assert "Mjlab-Jump-Flat-MicroDuck" in tasks
     assert "Mjlab-Jump-Flat-Backlash-MicroDuck" in tasks
+
+
+def test_landing_is_gated_on_airborne_latch():
+    """Verify that the landing composite reward requires the airborne latch."""
+    cfg = make_microduck_jump_env_cfg()
+    assert cfg.rewards["jump_landing"].params["require_airborne_latch"] is True
+    assert "reset_jump_state" in cfg.events
+

@@ -106,34 +106,34 @@ def make_microduck_jump_env_cfg(
             del cfg.rewards[name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
-    # Strong upright reward to keep torso vertical throughout the jump
+    # Upright reward to keep torso vertical (weight 1.0 allows slight lean for launch)
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 2.0
+        cfg.rewards["upright"].weight = 1.0
         cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
 
     # Damping roll/pitch angular wobble
     if "body_ang_vel" in cfg.rewards:
         cfg.rewards["body_ang_vel"].weight = -0.05
 
-    # Action smoothness (damp high-frequency servo jitter)
+    # Action smoothness (damp high-frequency servo jitter without blocking big launch)
     if "action_rate_l2" in cfg.rewards:
-        cfg.rewards["action_rate_l2"].weight = -0.2
+        cfg.rewards["action_rate_l2"].weight = -0.1
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Initial explosive upward push-off velocity near the floor
+    # 1. Initial explosive upward push-off velocity near the floor (boosted)
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
-        weight=2.0,
+        weight=4.0,
         params={
-            "max_height": 0.13,
+            "max_height": 0.135,
             "upright_std": 0.3,
         },
     )
 
-    # 2. Airborne reward: both feet fully in the air while upright
+    # 2. Airborne reward: both feet fully in the air while upright (boosted)
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
-        weight=5.0,
+        weight=6.0,
         params={
             "sensor_name": "feet_ground_contact",
             "min_height": 0.125,
@@ -144,7 +144,7 @@ def make_microduck_jump_env_cfg(
     # 3. Apex height target: Gaussian reward for reaching apex z ≈ 0.16 m
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_height_target,
-        weight=3.0,
+        weight=4.0,
         params={
             "target_height": JUMP_TARGET_APEX_Z,
             "height_std": 0.025,
@@ -152,23 +152,24 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Landing recovery: composite score pulling robot back to HOME standing pose
+    # 4. Landing recovery: gated on having jumped! Zero at spawn.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
-        weight=2.0,
+        weight=3.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
             "upright_std": 0.25,
             "pose_std": 0.3,
             "joint_indices": _LEG_JOINTS,
+            "require_airborne_latch": True,
         },
     )
 
     # 5. Lateral drift penalty: keep jump strictly vertical in-place (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
-        weight=-1.0,
+        weight=-0.5,
     )
 
     # 6. Touchdown impact penalty: protect XL330 gears from extreme landing force
@@ -179,6 +180,13 @@ def make_microduck_jump_env_cfg(
             "sensor_name": "feet_ground_contact",
             "force_threshold": 25.0,
         },
+    )
+
+    # ── Events ────────────────────────────────────────────────────────────────
+    # Reset the airborne latch on every episode reset
+    cfg.events["reset_jump_state"] = EventTermCfg(
+        func=microduck_mdp.reset_jump_state,
+        mode="reset",
     )
 
     # ── Terminations ──────────────────────────────────────────────────────────
