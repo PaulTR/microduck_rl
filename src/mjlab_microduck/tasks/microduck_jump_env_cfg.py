@@ -45,8 +45,8 @@ ENCODER_BIAS_RANGE                  = (-0.015, 0.015)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # ── Task constants ────────────────────────────────────────────────────────────
-# 2.0 seconds at 50 Hz = 100 control steps. Enough for squat, launch, flight, landing.
-EPISODE_LENGTH_S = 2.0
+# 1.0 second at 50 Hz = 50 control steps (squat, launch, flight, and landing).
+EPISODE_LENGTH_S = 1.0
 
 # Trunk heights (m)
 STAND_Z = 0.115
@@ -122,7 +122,7 @@ def make_microduck_jump_env_cfg(
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 0.5
+        cfg.rewards["upright"].weight = 0.2
         cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
 
     if "body_ang_vel" in cfg.rewards:
@@ -135,7 +135,7 @@ def make_microduck_jump_env_cfg(
     # 1. Initial explosive upward push-off velocity near the floor
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
-        weight=6.0,
+        weight=8.0,
         params={
             "max_height": 0.135,
             "upright_std": 0.3,
@@ -165,16 +165,18 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.125m)
+    # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.130m for >= 4 steps)
+    # AND only active after takeoff phase (step >= 16).
     # Pulls all 14 joints back into standing posture with neck/head upright and forward.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
-        weight=4.0,
+        weight=3.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
             "upright_std": 0.25,
             "pose_std": 0.3,
+            "min_landing_step": 16,
             "joint_indices": _ALL_JOINTS,
             "target_overrides": {5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0},
             "require_airborne_latch": True,

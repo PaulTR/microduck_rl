@@ -7206,21 +7206,23 @@ def roulade_lateral_velocity_penalty(
 #   - jump_landing_composite: strictly 0.0 until airborne latch is earned.
 
 
-def _jump_state(env: ManagerBasedRlEnv) -> torch.Tensor:
+def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
     if not hasattr(env, "_jump_airborne_latch"):
         env._jump_airborne_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._jump_airborne_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
         env._jump_last_update_step = -1
-    return env._jump_airborne_latch
+    return env._jump_airborne_latch, env._jump_airborne_count
 
 
 def _update_jump_state(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    min_airborne_height: float = 0.125,
+    min_airborne_height: float = 0.130,
+    min_airborne_steps: int = 4,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
-    """Check if the robot has achieved flight and latch the airborne flag."""
-    _jump_state(env)
+    """Check if the robot has achieved genuine flight and latch the airborne flag."""
+    latch, count = _jump_state(env)
     step = int(env.common_step_counter)
     if step != env._jump_last_update_step:
         asset: Entity = env.scene[asset_cfg.name]
@@ -7240,7 +7242,13 @@ def _update_jump_state(
         upright_ok = tilt_sq < 0.25
 
         is_airborne_now = both_feet_airborne & height_ok & upright_ok
-        env._jump_airborne_latch = env._jump_airborne_latch | is_airborne_now
+        # Accumulate genuine airborne steps
+        count[:] = torch.where(is_airborne_now, count + 1, count)
+
+        # Latch flips True ONLY if robot was in the air for at least min_airborne_steps
+        # (kills single-frame contact noise and tiptoe contact flickers)
+        legit_flight = count >= min_airborne_steps
+        latch[:] = latch | legit_flight
         env._jump_last_update_step = step
 
 
@@ -7251,8 +7259,9 @@ def reset_jump_state(
     """Reset the jump airborne latch on episode reset."""
     if env_ids is None or len(env_ids) == 0:
         return
-    _jump_state(env)
-    env._jump_airborne_latch[env_ids] = False
+    latch, count = _jump_state(env)
+    latch[env_ids] = False
+    count[env_ids] = 0
     env._jump_last_update_step = -1
 
 
@@ -7341,12 +7350,18 @@ def jump_landing_composite(
     height_std: float = 0.02,
     upright_std: float = 0.25,
     pose_std: float = 0.3,
+    min_landing_step: int = 16,
     joint_indices: list = None,
     target_overrides: Optional[dict] = None,
     require_airborne_latch: bool = True,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Standing composite score to stabilize the robot in HOME pose upon landing."""
+    """Standing composite score to stabilize the robot in HOME pose upon landing.
+
+    Gated on:
+      1. Legitimate multi-step airborne flight (airborne latch).
+      2. Step >= min_landing_step (after the launch & flight phase).
+    """
     _update_jump_state(env, asset_cfg=asset_cfg)
     if joint_indices is None:
         joint_indices = list(range(14))  # all 14 joints by default
@@ -7361,9 +7376,9 @@ def jump_landing_composite(
         target_overrides=target_overrides,
         asset_cfg=asset_cfg,
     )
-    if require_airborne_latch:
-        score = score * env._jump_airborne_latch.float()
-    return score
+    step_gate = (env.episode_length_buf >= min_landing_step).float()
+    latch_gate = env._jump_airborne_latch.float() if require_airborne_latch else 1.0
+    return score * step_gate * latch_gate
 
 
 def leg_similarity_reward(

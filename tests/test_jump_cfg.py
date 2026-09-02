@@ -36,6 +36,7 @@ def test_jump_rewards_present_and_signs():
     assert "jump_landing" in cfg.rewards
     assert cfg.rewards["jump_landing"].weight > 0.0
     assert cfg.rewards["jump_landing"].params["target_height"] == STAND_Z
+    assert cfg.rewards["jump_landing"].params["min_landing_step"] == 16
     assert cfg.rewards["jump_landing"].params["target_overrides"] == {5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0}
 
     assert "leg_similarity" in cfg.rewards
