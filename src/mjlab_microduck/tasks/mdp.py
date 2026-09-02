@@ -7200,56 +7200,45 @@ def roulade_lateral_velocity_penalty(
 #   4. Landing & Stabilization: Gated on having achieved genuine flight (airborne latch).
 #      Touchdown absorption and recovery to stable HOME standing posture.
 #
-# Latch & Progress Accounting:
-#   - env._jump_max_z: tracks peak height reached this episode (potential-based).
-#   - env._jump_airborne_latch: flips True ONLY when both feet are off ground AND
-#     trunk z reaches >= 0.130m (with upright torso).
-#   - jump_launch_velocity: gated on step <= max_step (initial thrust only; prevents bopping).
-#   - jump_landing_composite: strictly 0.0 until the 0.130m airborne latch is earned.
+# Latch & Height Accounting:
+#   - env._jump_airborne_latch: flips True when both feet break ground contact
+#     with z >= 0.125m and upright orientation.
+#   - jump_landing_composite: strictly 0.0 until airborne latch is earned.
 
 
-def _jump_state(env: ManagerBasedRlEnv, stand_z: float = 0.115) -> tuple:
+def _jump_state(env: ManagerBasedRlEnv) -> torch.Tensor:
     if not hasattr(env, "_jump_airborne_latch"):
         env._jump_airborne_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        env._jump_max_z = torch.full((env.num_envs,), stand_z, device=env.device)
         env._jump_last_update_step = -1
-    return env._jump_airborne_latch, env._jump_max_z
+    return env._jump_airborne_latch
 
 
 def _update_jump_state(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    min_airborne_height: float = 0.130,
-    stand_z: float = 0.115,
+    min_airborne_height: float = 0.125,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
-    """Check if the robot has achieved genuine flight and latch the airborne flag."""
-    _jump_state(env, stand_z=stand_z)
+    """Check if the robot has achieved flight and latch the airborne flag."""
+    _jump_state(env)
     step = int(env.common_step_counter)
     if step != env._jump_last_update_step:
         asset: Entity = env.scene[asset_cfg.name]
-        # Check both feet off ground
         if sensor_name in env.scene.sensors:
             found = env.scene.sensors[sensor_name].data.found
             both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
         else:
             both_feet_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
-        # Trunk height above terrain origin
         z = torch.nan_to_num(
             asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
         )
         height_ok = z >= min_airborne_height
 
-        # Track max height reached
-        env._jump_max_z = torch.maximum(env._jump_max_z, z)
-
-        # Check orientation upright (not fallen, tilt < ~25 deg)
         quat = asset.data.root_link_quat_w
         tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-        upright_ok = tilt_sq < 0.20
+        upright_ok = tilt_sq < 0.25
 
-        # Latch: once airborne at >= min_airborne_height, it stays True for the episode
         is_airborne_now = both_feet_airborne & height_ok & upright_ok
         env._jump_airborne_latch = env._jump_airborne_latch | is_airborne_now
         env._jump_last_update_step = step
@@ -7258,49 +7247,13 @@ def _update_jump_state(
 def reset_jump_state(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
-    stand_z: float = 0.115,
 ) -> None:
-    """Reset the jump state and airborne latch on episode reset."""
+    """Reset the jump airborne latch on episode reset."""
     if env_ids is None or len(env_ids) == 0:
         return
-    _jump_state(env, stand_z=stand_z)
+    _jump_state(env)
     env._jump_airborne_latch[env_ids] = False
-    env._jump_max_z[env_ids] = stand_z
     env._jump_last_update_step = -1
-
-
-def jump_peak_height_progress(
-    env: ManagerBasedRlEnv,
-    target_apex_height: float = 0.145,
-    stand_z: float = 0.115,
-    upright_std: float = 0.25,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Potential-based reward for new peak height achieved during the jump.
-
-    Pays for every millimeter of height gained between stand_z and target_apex_height.
-    A small step pays almost nothing once; an explosive jump collects the full reward.
-    """
-    asset: Entity = env.scene[asset_cfg.name]
-    _update_jump_state(env, stand_z=stand_z, asset_cfg=asset_cfg)
-    z = torch.nan_to_num(
-        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
-    )
-
-    quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright_score = torch.exp(-tilt_sq / (upright_std * upright_std))
-
-    # Calculate height progress
-    old_max = env._jump_max_z.clone()
-    new_max = torch.maximum(old_max, z)
-    paid_old = torch.clamp(old_max, min=stand_z, max=target_apex_height)
-    paid_new = torch.clamp(new_max, min=stand_z, max=target_apex_height)
-    delta_z = torch.clamp(paid_new - paid_old, min=0.0)
-    env._jump_max_z = new_max
-
-    span = max(target_apex_height - stand_z, 1e-4)
-    return (delta_z / span) * upright_score
 
 
 def jump_air_time_reward(
@@ -7330,16 +7283,35 @@ def jump_air_time_reward(
     return both_feet_airborne * height_gate * upright_score
 
 
+def jump_height_target(
+    env: ManagerBasedRlEnv,
+    target_height: float = 0.150,
+    height_std: float = 0.025,
+    upright_std: float = 0.25,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Gaussian reward for reaching apex height while upright."""
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    height_g = torch.exp(-((z - target_height) / height_std) ** 2)
+
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
+
+    return height_g * upright_g
+
+
 def jump_launch_velocity(
     env: ManagerBasedRlEnv,
     max_height: float = 0.135,
-    max_step: int = 18,
     upright_std: float = 0.3,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward positive upward vertical velocity vz during the initial launch phase (first ~0.35s)."""
+    """Reward positive upward vertical velocity vz while near the ground."""
     asset: Entity = env.scene[asset_cfg.name]
-    step_gate = (env.episode_length_buf <= max_step).float()
     z = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
     )
@@ -7350,7 +7322,7 @@ def jump_launch_velocity(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return upward_vz * (z < max_height).float() * step_gate * upright_g
+    return upward_vz * (z < max_height).float() * upright_g
 
 
 def jump_landing_composite(
@@ -7363,12 +7335,8 @@ def jump_landing_composite(
     require_airborne_latch: bool = True,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Standing composite score to stabilize the robot in HOME pose upon landing.
-
-    Gated by default on require_airborne_latch=True:
-    If the robot has NOT jumped to >= 0.130m yet, this returns ZERO!
-    """
-    _update_jump_state(env, stand_z=target_height, asset_cfg=asset_cfg)
+    """Standing composite score to stabilize the robot in HOME pose upon landing."""
+    _update_jump_state(env, asset_cfg=asset_cfg)
     if joint_indices is None:
         joint_indices = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]  # leg joints
 
@@ -7384,6 +7352,34 @@ def jump_landing_composite(
     if require_airborne_latch:
         score = score * env._jump_airborne_latch.float()
     return score
+
+
+def leg_similarity_reward(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    joint_bases: tuple = ("hip_pitch", "knee", "ankle"),
+) -> torch.Tensor:
+    """Soft guidance encouraging left and right leg positions to be similar.
+
+    Provides a smooth Gaussian reward exp(-diff / 0.3) so both legs contribute
+    without imposing rigid mathematical symmetry constraints.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    if not hasattr(env, "_leg_sim_ids"):
+        left, right = [], []
+        for base in joint_bases:
+            li, _ = asset.find_joints([f"left_{base}"])
+            ri, _ = asset.find_joints([f"right_{base}"])
+            left.append(li[0])
+            right.append(ri[0])
+        env._leg_sim_ids = (
+            torch.tensor(left, device=env.device),
+            torch.tensor(right, device=env.device),
+        )
+    lids, rids = env._leg_sim_ids
+    q = asset.data.joint_pos
+    diff = torch.abs(q[:, lids] + q[:, rids]).mean(dim=-1)
+    return torch.exp(-diff / 0.3)
 
 
 def jump_lateral_drift_penalty(

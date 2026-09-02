@@ -31,17 +31,14 @@ def test_jump_rewards_present_and_signs():
 
     assert "jump_height" in cfg.rewards
     assert cfg.rewards["jump_height"].weight > 0.0
-    assert cfg.rewards["jump_height"].params["target_apex_height"] == JUMP_TARGET_APEX_Z
+    assert cfg.rewards["jump_height"].params["target_height"] == JUMP_TARGET_APEX_Z
 
     assert "jump_landing" in cfg.rewards
     assert cfg.rewards["jump_landing"].weight > 0.0
     assert cfg.rewards["jump_landing"].params["target_height"] == STAND_Z
 
-    assert "heading_anchor" in cfg.rewards
-    assert cfg.rewards["heading_anchor"].weight > 0.0
-
-    assert "leg_symmetry" in cfg.rewards
-    assert cfg.rewards["leg_symmetry"].weight > 0.0
+    assert "leg_similarity" in cfg.rewards
+    assert cfg.rewards["leg_similarity"].weight > 0.0
 
     # Negative penalty / cost terms
     assert "jump_drift_penalty" in cfg.rewards

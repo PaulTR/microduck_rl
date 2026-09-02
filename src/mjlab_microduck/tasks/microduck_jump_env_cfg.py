@@ -20,8 +20,8 @@ Key design points:
 import math
 from copy import deepcopy
 
-# Left/Right symmetry enabled to ensure bilateral symmetric push-off
-ENABLE_SYMMETRY = True
+# Left/Right symmetry mirror loss disabled to allow full exploratory explosive power
+ENABLE_SYMMETRY = False
 
 # ── Domain randomisation (matched to velocity / standup for sim2real parity) ───
 ENABLE_COM_RANDOMIZATION             = True
@@ -45,12 +45,12 @@ ENCODER_BIAS_RANGE                  = (-0.015, 0.015)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # ── Task constants ────────────────────────────────────────────────────────────
-# 1.2 seconds at 50 Hz = 60 control steps (squat, launch, flight, and landing).
-EPISODE_LENGTH_S = 1.2
+# 2.0 seconds at 50 Hz = 100 control steps. Enough for squat, launch, flight, landing.
+EPISODE_LENGTH_S = 2.0
 
 # Trunk heights (m)
 STAND_Z = 0.115
-JUMP_TARGET_APEX_Z = 0.145
+JUMP_TARGET_APEX_Z = 0.150
 
 # Servo indices
 _LEG_JOINTS  = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
@@ -93,7 +93,6 @@ def make_microduck_jump_env_cfg(
     cfg.episode_length_s = EPISODE_LENGTH_S
 
     # ── Drop walking & passive tracking rewards ───────────────────────────────
-    # Standing still must not earn an annuity from unused tracking tasks.
     for name in [
         "track_linear_velocity",
         "track_angular_velocity",
@@ -120,29 +119,24 @@ def make_microduck_jump_env_cfg(
         if name in cfg.curriculum:
             del cfg.curriculum[name]
 
-    # ── Tune general posture & smoothness stabilizers (keep LOW during skill discovery)
-    # Low weights ensure "standing still" does NOT beat attempting the jump.
+    # ── Tune general posture & smoothness stabilizers ─────────────────────────
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 0.2
+        cfg.rewards["upright"].weight = 1.0
         cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
 
     if "body_ang_vel" in cfg.rewards:
-        cfg.rewards["body_ang_vel"].weight = -0.02
-
-    if "angular_momentum" in cfg.rewards:
-        cfg.rewards["angular_momentum"].weight = -0.01
+        cfg.rewards["body_ang_vel"].weight = -0.05
 
     if "action_rate_l2" in cfg.rewards:
-        cfg.rewards["action_rate_l2"].weight = -0.05
+        cfg.rewards["action_rate_l2"].weight = -0.1
 
-    # ── Add Jump Task Rewards (Dominant Mass) ──────────────────────────────────
-    # 1. Initial explosive upward push-off velocity near the floor (first 0.35s only)
+    # ── Add Jump Task Rewards ─────────────────────────────────────────────────
+    # 1. Initial explosive upward push-off velocity near the floor
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
-        weight=10.0,
+        weight=4.0,
         params={
             "max_height": 0.135,
-            "max_step": 18,
             "upright_std": 0.3,
         },
     )
@@ -150,7 +144,7 @@ def make_microduck_jump_env_cfg(
     # 2. Airborne reward: both feet fully in the air while upright
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
-        weight=15.0,
+        weight=6.0,
         params={
             "sensor_name": "feet_ground_contact",
             "min_height": 0.125,
@@ -158,21 +152,21 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 3. Peak height progress: potential-based reward paying for every mm gained
+    # 3. Apex height target: Gaussian reward for reaching apex z ≈ 0.150 m
     cfg.rewards["jump_height"] = RewardTermCfg(
-        func=microduck_mdp.jump_peak_height_progress,
-        weight=15.0,
+        func=microduck_mdp.jump_height_target,
+        weight=4.0,
         params={
-            "target_apex_height": JUMP_TARGET_APEX_Z,
-            "stand_z": STAND_Z,
+            "target_height": JUMP_TARGET_APEX_Z,
+            "height_std": 0.025,
             "upright_std": 0.25,
         },
     )
 
-    # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.130m)
+    # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.125m)
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
-        weight=5.0,
+        weight=3.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
@@ -183,32 +177,25 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 5. Lateral & forward drift penalty: strictly penalize horizontal stepping (negative weight)
+    # 5. Lateral drift penalty: keep jump vertical in-place (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
-        weight=-2.0,
+        weight=-0.5,
     )
 
-    # 6. Yaw spin rate penalty: strictly penalize clockwise/counter-clockwise rotation
+    # 6. Yaw spin rate penalty: penalize rotation
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
-        weight=-1.0,
+        weight=-0.5,
     )
 
-    # 7. Heading anchor: small guidance reward to keep initial spawn heading
-    cfg.rewards["heading_anchor"] = RewardTermCfg(
-        func=microduck_mdp.heading_hold_reward,
-        weight=0.2,
-        params={"std": 0.25},
+    # 7. Leg similarity: soft guidance so both legs push together
+    cfg.rewards["leg_similarity"] = RewardTermCfg(
+        func=microduck_mdp.leg_similarity_reward,
+        weight=0.8,
     )
 
-    # 8. Bilateral leg symmetry: enforce identical mirrored left/right push-off
-    cfg.rewards["leg_symmetry"] = RewardTermCfg(
-        func=microduck_mdp.leg_symmetry_reward,
-        weight=0.2,
-    )
-
-    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 8. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,
@@ -219,11 +206,10 @@ def make_microduck_jump_env_cfg(
     )
 
     # ── Events ────────────────────────────────────────────────────────────────
-    # Reset the airborne latch and max height on every episode reset
+    # Reset the airborne latch on every episode reset
     cfg.events["reset_jump_state"] = EventTermCfg(
         func=microduck_mdp.reset_jump_state,
         mode="reset",
-        params={"stand_z": STAND_Z},
     )
 
     # ── Terminations ──────────────────────────────────────────────────────────
