@@ -1397,3 +1397,40 @@ With the standing salary removed, the algorithm's only viable path to reward is 
 
 ---
 
+## User
+
+now running training says head pose bias not found in active terms
+
+---
+
+## Assistant
+
+### Fixed: Orphaned Curriculum Removed
+
+When we deleted `head_pose_bias` from the rewards in the previous step, an automated schedule in `cfg.curriculum["head_pose_bias_weight"]` (inherited from the base walking recipe) tried to ramp it during training and threw `KeyError`.
+
+---
+
+### What Was Fixed (Commit `daa13d7` on `paul/jump`):
+
+We removed all unused curricula inherited from walking/head tracking:
+* `head_pose_bias_weight` (removed)
+* `standing_envs` (walking speed schedule, removed)
+* `head_pose_range` (head movement schedule, removed)
+* `body_pose_range` (body pose schedule, removed)
+* `action_rate_weight` (fixed action rate weight, removed)
+
+Now, only the Domain Randomization curricula (`com_range`, `head_com_range`) are active.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+---
+
