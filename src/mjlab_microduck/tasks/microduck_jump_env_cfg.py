@@ -121,10 +121,9 @@ def make_microduck_jump_env_cfg(
             del cfg.curriculum[name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
-    # Strong upright reward to keep torso vertical and prevent tipping forward
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 2.0
-        cfg.rewards["upright"].params["std"] = math.sqrt(0.04)
+        cfg.rewards["upright"].weight = 0.5
+        cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
 
     if "body_ang_vel" in cfg.rewards:
         cfg.rewards["body_ang_vel"].weight = -0.05
@@ -132,8 +131,8 @@ def make_microduck_jump_env_cfg(
     if "action_rate_l2" in cfg.rewards:
         cfg.rewards["action_rate_l2"].weight = -0.1
 
-    # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Initial explosive upward push-off velocity near the floor (boosted)
+    # ── Add Jump Task Rewards (Dominant Mass) ──────────────────────────────────
+    # 1. Initial explosive upward push-off velocity near the floor
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
         weight=6.0,
@@ -143,7 +142,7 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 2. Airborne reward: both feet fully in the air while upright (boosted)
+    # 2. Airborne reward: both feet fully in the air while upright
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
         weight=8.0,
@@ -166,52 +165,41 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Head upright stability: hold neck and head strictly vertical and looking forward
-    # Target overrides set neck_pitch=0.0, head_pitch=0.0, head_yaw=0.0, head_roll=0.0
-    # (overriding the default 20-degree forward lean of HOME_FRAME).
-    cfg.rewards["head_home_pose"] = RewardTermCfg(
-        func=microduck_mdp.pose_target_match,
-        weight=4.0,
-        params={
-            "std": 0.15,
-            "joint_indices": _NECK_JOINTS,
-            "target_overrides": {5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0},
-        },
-    )
-
-    # 5. Landing recovery: gated on having achieved flight (z >= 0.125m)
+    # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.125m)
+    # Pulls all 14 joints back into standing posture with neck/head upright and forward.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
-        weight=2.0,
+        weight=4.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
             "upright_std": 0.25,
             "pose_std": 0.3,
             "joint_indices": _ALL_JOINTS,
+            "target_overrides": {5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0},
             "require_airborne_latch": True,
         },
     )
 
-    # 6. Lateral & forward drift penalty: strictly penalize forward skittering (negative weight)
+    # 5. Lateral & forward drift penalty: strictly penalize forward skittering (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
         weight=-2.0,
     )
 
-    # 7. Yaw spin rate penalty: penalize rotation
+    # 6. Yaw spin rate penalty: penalize rotation
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
         weight=-0.5,
     )
 
-    # 8. Leg similarity: soft guidance so both legs push together
+    # 7. Leg similarity: soft guidance so both legs push together
     cfg.rewards["leg_similarity"] = RewardTermCfg(
         func=microduck_mdp.leg_similarity_reward,
-        weight=0.8,
+        weight=0.5,
     )
 
-    # 9. Touchdown impact penalty: relaxed so robot is not penalized for firm landings
+    # 8. Touchdown impact penalty: relaxed so robot is not penalized for firm landings
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.01,

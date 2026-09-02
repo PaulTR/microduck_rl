@@ -7342,13 +7342,14 @@ def jump_landing_composite(
     upright_std: float = 0.25,
     pose_std: float = 0.3,
     joint_indices: list = None,
+    target_overrides: Optional[dict] = None,
     require_airborne_latch: bool = True,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Standing composite score to stabilize the robot in HOME pose upon landing."""
     _update_jump_state(env, asset_cfg=asset_cfg)
     if joint_indices is None:
-        joint_indices = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]  # leg joints
+        joint_indices = list(range(14))  # all 14 joints by default
 
     score = standing_composite_score(
         env,
@@ -7357,6 +7358,7 @@ def jump_landing_composite(
         upright_std=upright_std,
         pose_std=pose_std,
         joint_indices=joint_indices,
+        target_overrides=target_overrides,
         asset_cfg=asset_cfg,
     )
     if require_airborne_latch:
