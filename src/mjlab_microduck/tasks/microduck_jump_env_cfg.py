@@ -154,24 +154,28 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 3. Apex height target: major reward for reaching apex z ≈ 0.150 m (boosted)
+    # 3. Apex height target: major reward for reaching apex z ≈ 0.150 m while AIRBORNE
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_height_target,
         weight=8.0,
         params={
+            "sensor_name": "feet_ground_contact",
             "target_height": JUMP_TARGET_APEX_Z,
             "height_std": 0.025,
             "upright_std": 0.25,
         },
     )
 
-    # 4. Head upright stability: strong restoring reward keeping neck/head erect (boosted)
+    # 4. Head upright stability: hold neck and head strictly vertical and looking forward
+    # Target overrides set neck_pitch=0.0, head_pitch=0.0, head_yaw=0.0, head_roll=0.0
+    # (overriding the default 20-degree forward lean of HOME_FRAME).
     cfg.rewards["head_home_pose"] = RewardTermCfg(
         func=microduck_mdp.pose_target_match,
-        weight=3.0,
+        weight=4.0,
         params={
             "std": 0.15,
             "joint_indices": _NECK_JOINTS,
+            "target_overrides": {5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0},
         },
     )
 

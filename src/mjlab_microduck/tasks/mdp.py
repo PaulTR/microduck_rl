@@ -7285,13 +7285,23 @@ def jump_air_time_reward(
 
 def jump_height_target(
     env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
     target_height: float = 0.150,
     height_std: float = 0.025,
     upright_std: float = 0.25,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Gaussian reward for reaching apex height while upright."""
+    """Gaussian reward for reaching apex height while upright AND AIRBORNE.
+
+    Gated on both feet being off the ground so standing on tiptoes pays 0.0!
+    """
     asset: Entity = env.scene[asset_cfg.name]
+    if sensor_name in env.scene.sensors:
+        found = env.scene.sensors[sensor_name].data.found
+        both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1).float()
+    else:
+        both_feet_airborne = torch.ones(env.num_envs, device=env.device)
+
     z = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
     )
@@ -7301,7 +7311,7 @@ def jump_height_target(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return height_g * upright_g
+    return both_feet_airborne * height_g * upright_g
 
 
 def jump_launch_velocity(
