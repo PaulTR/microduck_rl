@@ -1560,3 +1560,52 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 
 ---
 
+## User
+
+ok not quite. it skitters forward with its head in front of it, then falls over. Let's put more emphasis on head up and jump height, less on landing softly
+
+---
+
+## Assistant
+
+### Prioritized Head Upright & Jump Height
+
+Changes are live on `paul/jump` (commit `efbd6ca`).
+
+---
+
+### Why It Was Skittering Forward:
+
+1. **Head Sagging / Drooping Forward:**
+   * The head makes up **38% of Microduck's body mass**.
+   * When the head hung forward, the center of mass (CoM) shifted ahead of the feet. When the legs pushed off, that forward CoM turned the vertical thrust into a forward pitching torque, causing the robot to skitter forward across the floor and topple.
+2. **Soft Landing Tax:**
+   * The foot impact penalty (`jump_foot_impact`) was discouraging high, energetic landings.
+
+---
+
+### Key Adjustments Made:
+
+1. **Strict Head Upright Restoring Force (`head_home_pose`, weight `3.0`, $\text{std} = 0.15$):**
+   * Tripled the reward and tightened the tolerance ($\sim 8.5^\circ$) so the 4 neck/head servos are firmly held upright in neutral alignment throughout the maneuver.
+2. **Prioritized Apex Jump Height (`jump_height`, weight `8.0` & `jump_air_time`, weight `8.0`):**
+   * Doubled the reward for achieving vertical apex flight ($z = 0.150\text{ m}$).
+   * Boosted takeoff launch impulse `jump_launch` to **`6.0`**.
+3. **Relaxed Soft Landing Penalties:**
+   * `jump_foot_impact` reduced $10\times$ (weight $-0.1 \to \mathbf{-0.01}$, threshold $25\text{N} \to 30\text{N}$) so the policy is not penalized for firm landings.
+   * `jump_landing` reduced to **`2.0`**.
+4. **Suppressed Forward Skittering (`jump_drift_penalty`, weight `-2.0` & `upright`, weight `2.0`):**
+   * Heavily taxes horizontal velocity ($v_x^2 + v_y^2$) and forward torso tilt so the push-off remains strictly vertical in place.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+---
+
