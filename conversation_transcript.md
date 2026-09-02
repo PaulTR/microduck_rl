@@ -1516,3 +1516,47 @@ This restores the explosive jumping dynamics with gentle bilateral leg coordinat
 
 ---
 
+## User
+
+this is definitely close. the head wobbles now so i just want it to return to its upright position after jumping and landing
+
+---
+
+## Assistant
+
+### Head Upright & Landing Alignment Fix Applied!
+
+The changes are live on `paul/jump` (commit `4d83b5f`).
+
+---
+
+### Why the Head Was Wobbling / Sagging:
+
+1. **Neck/Head Joints Were Excluded from Landing Score:**
+   * Previously, `jump_landing` only checked `_LEG_JOINTS` (`[0, 1, 2, 3, 4, 9, 10, 11, 12, 13]`). 
+   * The 4 neck/head servos (`_NECK_JOINTS = [5, 6, 7, 8]`: neck_pitch, head_pitch, head_yaw, head_roll) were completely excluded, so the landing reward had zero incentive to pull the head back to neutral.
+2. **Heavy Head Mass (38% of Robot):**
+   * Without a dedicated restoring force, the inertia of the heavy head during takeoff and touchdown caused it to wobble and drift.
+
+---
+
+### What Was Added:
+
+1. **Full 14-Servo Landing Target (`_ALL_JOINTS`):**
+   * `jump_landing` composite reward now checks **all 14 servos** (legs + neck/head), ensuring that sticking the landing requires the head to be upright and aligned with `HOME` posture.
+2. **Head Upright Posture Restoring Reward (`head_home_pose`, weight `1.0`):**
+   * Applies a gentle Gaussian reward ($\text{std} = 0.25\text{ rad} \approx 14^\circ$) specifically to `_NECK_JOINTS`.
+   * This provides a constant stabilizing restoring force that keeps the head centered and steady before, during, and after the jump.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+---
+
