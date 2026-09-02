@@ -121,9 +121,10 @@ def make_microduck_jump_env_cfg(
             del cfg.curriculum[name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
+    # Strong upright reward to keep torso vertical and prevent tipping forward
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 1.0
-        cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
+        cfg.rewards["upright"].weight = 2.0
+        cfg.rewards["upright"].params["std"] = math.sqrt(0.04)
 
     if "body_ang_vel" in cfg.rewards:
         cfg.rewards["body_ang_vel"].weight = -0.05
@@ -132,20 +133,20 @@ def make_microduck_jump_env_cfg(
         cfg.rewards["action_rate_l2"].weight = -0.1
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Initial explosive upward push-off velocity near the floor
+    # 1. Initial explosive upward push-off velocity near the floor (boosted)
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
-        weight=4.0,
+        weight=6.0,
         params={
             "max_height": 0.135,
             "upright_std": 0.3,
         },
     )
 
-    # 2. Airborne reward: both feet fully in the air while upright
+    # 2. Airborne reward: both feet fully in the air while upright (boosted)
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
-        weight=6.0,
+        weight=8.0,
         params={
             "sensor_name": "feet_ground_contact",
             "min_height": 0.125,
@@ -153,10 +154,10 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 3. Apex height target: Gaussian reward for reaching apex z ≈ 0.150 m
+    # 3. Apex height target: major reward for reaching apex z ≈ 0.150 m (boosted)
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_height_target,
-        weight=4.0,
+        weight=8.0,
         params={
             "target_height": JUMP_TARGET_APEX_Z,
             "height_std": 0.025,
@@ -164,11 +165,20 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.125m)
-    # Pulls all 14 joints (both legs AND neck/head) back into the neutral HOME posture.
+    # 4. Head upright stability: strong restoring reward keeping neck/head erect (boosted)
+    cfg.rewards["head_home_pose"] = RewardTermCfg(
+        func=microduck_mdp.pose_target_match,
+        weight=3.0,
+        params={
+            "std": 0.15,
+            "joint_indices": _NECK_JOINTS,
+        },
+    )
+
+    # 5. Landing recovery: gated on having achieved flight (z >= 0.125m)
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
-        weight=3.0,
+        weight=2.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
@@ -179,20 +189,10 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 5. Head posture stability: gentle restoring reward keeping neck/head upright and centered
-    cfg.rewards["head_home_pose"] = RewardTermCfg(
-        func=microduck_mdp.pose_target_match,
-        weight=1.0,
-        params={
-            "std": 0.25,
-            "joint_indices": _NECK_JOINTS,
-        },
-    )
-
-    # 6. Lateral drift penalty: keep jump vertical in-place (negative weight)
+    # 6. Lateral & forward drift penalty: strictly penalize forward skittering (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
-        weight=-0.5,
+        weight=-2.0,
     )
 
     # 7. Yaw spin rate penalty: penalize rotation
@@ -207,13 +207,13 @@ def make_microduck_jump_env_cfg(
         weight=0.8,
     )
 
-    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 9. Touchdown impact penalty: relaxed so robot is not penalized for firm landings
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
-        weight=-0.1,
+        weight=-0.01,
         params={
             "sensor_name": "feet_ground_contact",
-            "force_threshold": 25.0,
+            "force_threshold": 30.0,
         },
     )
 
