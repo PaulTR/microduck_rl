@@ -1434,3 +1434,85 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 
 ---
 
+## User
+
+These are the values on that skipping example
+                        Learning iteration 517/2000                            
+
+                               Run name: jump
+                            Total steps: 50921472
+                       Steps per second: 53074
+                        Collection time: 1.720s
+                          Learning time: 0.133s
+                        Mean value loss: 0.2708
+                    Mean surrogate loss: -0.0035
+                      Mean entropy loss: 9.4934
+                     Mean symmetry loss: 0.0115
+                            Mean reward: 8.19
+                    Mean episode length: 60.00
+                        Mean action std: 0.50
+                 Episode_Reward/upright: 0.1759
+            Episode_Reward/body_ang_vel: -0.0461
+        Episode_Reward/angular_momentum: -0.0000
+          Episode_Reward/dof_pos_limits: -0.0303
+          Episode_Reward/action_rate_l2: -1.0545
+         Episode_Reward/self_collisions: -0.2434
+             Episode_Reward/jump_launch: 0.2842
+           Episode_Reward/jump_air_time: 6.2938
+             Episode_Reward/jump_height: 0.0000
+            Episode_Reward/jump_landing: 1.7838
+      Episode_Reward/jump_drift_penalty: -0.1362
+           Episode_Reward/jump_yaw_rate: -0.4639
+          Episode_Reward/heading_anchor: 0.1605
+            Episode_Reward/leg_symmetry: -0.0171
+        Episode_Reward/jump_foot_impact: -0.0433
+        Episode_Metrics/mean_action_acc: 1.3390
+                   Curriculum/com_range: 0.0050
+              Curriculum/head_com_range: 0.0050
+             Metrics/twist/error_vel_xy: 0.0340
+            Metrics/twist/error_vel_yaw: 0.0796
+           Episode_Termination/time_out: 65.7083
+          Episode_Termination/fell_over: 0.6250
+Episode_Termination/out_of_terrain_bounds: 0.0000
+          Episode_Termination/nan_state: 0.0000
+          Metrics/angular_momentum_mean: 0.0051
+
+---
+
+## Assistant
+
+### Restored the Proven Jump Recipe with Soft Leg Similarity!
+
+Changes are live on `paul/jump` (commit `48f1f3d`).
+
+---
+
+### What Was Restored and Adjusted:
+
+1. **Restored the `4ae67ea` Explosive Jump Recipe:**
+   * `jump_air_time`: Weight **`6.0`** (pays whenever both feet leave the ground).
+   * `jump_height`: Weight **`4.0`** (continuous Gaussian apex target at $0.150\text{ m}$).
+   * `jump_launch`: Weight **`4.0`** (positive upward velocity $v_z$).
+   * `jump_landing`: Weight **`3.0`** (unlocked once airborne, pulling back to HOME standing pose).
+   * `EPISODE_LENGTH_S`: **`2.0s`**
+2. **Disabled Strict PPO Mirror Loss (`ENABLE_SYMMETRY = False`):**
+   * Turns off the strict neural network weight mirroring that was constraining the legs and causing head throwing.
+3. **Added Soft Leg Similarity (`leg_similarity`, weight `0.8`):**
+   * Encourages the left and right legs to push in a **similar** manner ($\exp(-\Delta \text{joint} / 0.3)$) so one leg doesn't do 100% of the work, but without rigid mathematical lock.
+4. **Dropped Orphaned Curricula & Head Tracking:**
+   * `head_pose_tracking`, `head_pose_bias`, and their schedules remain deleted to prevent any crashes or passive standing salaries.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+This restores the explosive jumping dynamics with gentle bilateral leg coordination!
+
+---
+
