@@ -1609,3 +1609,44 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 
 ---
 
+## User
+
+Head still flops mostly forward and now it walks on its tip toes instead of jumping
+
+---
+
+## Assistant
+
+### Root Causes Identified & Fixed
+
+Changes are live on `paul/jump` (commit `e3c4cb9`).
+
+---
+
+### 1. Why Was It Walking on Tiptoes Instead of Jumping?
+* **The Exploit:** `jump_height_target` was previously measuring trunk height $z$ without checking if the feet were in the air. 
+* By simply standing on its tiptoes, the robot raised its torso from $0.115\text{ m} \to 0.130\text{ m}$.
+* Because $0.130\text{ m}$ is close to the $0.150\text{ m}$ target, the Gaussian reward was paying **`4.24` points per step** continuously just for tiptoeing on the ground!
+* **The Fix:** We added a hard airborne contact gate (`sensor_name="feet_ground_contact"`) to `jump_height_target`. If either foot is touching the ground, `jump_height_target` evaluates to **strictly `0.00`**. The **only** way to earn height reward now is genuine flight in the air.
+
+---
+
+### 2. Why Did the Head Flop Forward?
+* **The Built-in HOME Bias:** In Microduck's default `HOME_FRAME` definition, `neck_pitch` is set to `+0.3491 rad` ($+20^\circ$) and `head_pitch` is set to `+0.3491 rad` ($+20^\circ$) — a **$40^\circ$ total forward droop** designed as a counterweight for walking.
+* When we told the head reward to match `HOME` pose, it was actively pulling the head into a **$40^\circ$ forward-leaning droop**!
+* **The Fix:** We configured explicit target overrides in `head_home_pose`:
+  $$\text{neck\_pitch} = 0.00,\quad \text{head\_pitch} = 0.00,\quad \text{head\_yaw} = 0.00,\quad \text{head\_roll} = 0.00$$
+  This forces the neck to stay strictly vertical and the head looking straight forward, placing the heavy head mass directly centered over the torso.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+---
+
