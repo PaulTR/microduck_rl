@@ -55,6 +55,7 @@ JUMP_TARGET_APEX_Z = 0.150
 # Servo indices
 _LEG_JOINTS  = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
 _NECK_JOINTS = [5, 6, 7, 8]
+_ALL_JOINTS  = list(range(14))
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
@@ -164,6 +165,7 @@ def make_microduck_jump_env_cfg(
     )
 
     # 4. Landing recovery: strictly gated on having achieved flight (z >= 0.125m)
+    # Pulls all 14 joints (both legs AND neck/head) back into the neutral HOME posture.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_composite,
         weight=3.0,
@@ -172,30 +174,40 @@ def make_microduck_jump_env_cfg(
             "height_std": 0.02,
             "upright_std": 0.25,
             "pose_std": 0.3,
-            "joint_indices": _LEG_JOINTS,
+            "joint_indices": _ALL_JOINTS,
             "require_airborne_latch": True,
         },
     )
 
-    # 5. Lateral drift penalty: keep jump vertical in-place (negative weight)
+    # 5. Head posture stability: gentle restoring reward keeping neck/head upright and centered
+    cfg.rewards["head_home_pose"] = RewardTermCfg(
+        func=microduck_mdp.pose_target_match,
+        weight=1.0,
+        params={
+            "std": 0.25,
+            "joint_indices": _NECK_JOINTS,
+        },
+    )
+
+    # 6. Lateral drift penalty: keep jump vertical in-place (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
         weight=-0.5,
     )
 
-    # 6. Yaw spin rate penalty: penalize rotation
+    # 7. Yaw spin rate penalty: penalize rotation
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
         weight=-0.5,
     )
 
-    # 7. Leg similarity: soft guidance so both legs push together
+    # 8. Leg similarity: soft guidance so both legs push together
     cfg.rewards["leg_similarity"] = RewardTermCfg(
         func=microduck_mdp.leg_similarity_reward,
         weight=0.8,
     )
 
-    # 8. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,

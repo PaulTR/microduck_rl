@@ -40,6 +40,9 @@ def test_jump_rewards_present_and_signs():
     assert "leg_similarity" in cfg.rewards
     assert cfg.rewards["leg_similarity"].weight > 0.0
 
+    assert "head_home_pose" in cfg.rewards
+    assert cfg.rewards["head_home_pose"].weight > 0.0
+
     # Negative penalty / cost terms
     assert "jump_drift_penalty" in cfg.rewards
     assert cfg.rewards["jump_drift_penalty"].weight < 0.0
