@@ -1925,3 +1925,38 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 
 ---
 
+## User
+
+Let's go with option one of using just the --jump flag --jump-once
+
+---
+
+## Assistant
+
+Option 1 is locked in and ready on `paul/jump`!
+
+### The Command:
+
+```bash
+uv run scripts/infer_policy.py --jump <jump.onnx> --jump-once --new-cmd-obs
+```
+
+### What Happens Under the Hood:
+1. **Settle (0.5s):** The viewer opens and Microduck settles into its stable standing HOME posture.
+2. **Jump (1.0s):** The robot crouches, launches into the air (keeping its head within $\pm 60^\circ$), reaches apex, and absorbs the landing.
+3. **Return to Standing (Holds):** Once the jump completes, it automatically locks and holds the standing HOME pose. It will **not** loop or jump again continuously.
+4. **Interactive Repeat:** If you want to see it jump again, simply tap **`J`** in the terminal!
+
+---
+
+### Pull and Train:
+
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+Once exported via `uv run scripts/export.py`, you can test it directly with the `--jump-once` command above!
+
+---
+
