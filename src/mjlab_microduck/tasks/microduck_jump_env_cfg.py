@@ -152,17 +152,19 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Landing recovery: gated on having jumped! Zero at spawn.
+    # 4. Compliant landing recovery: absorbs impact with a knee crouch upon touchdown,
+    # then smoothly extends back into an erect standing posture with upright head.
     cfg.rewards["jump_landing"] = RewardTermCfg(
-        func=microduck_mdp.jump_landing_composite,
+        func=microduck_mdp.jump_compliant_landing,
         weight=3.0,
         params={
-            "target_height": STAND_Z,
+            "crouch_height": 0.102,
+            "stand_height": STAND_Z,
+            "crouch_steps": 8,
+            "settle_steps": 16,
             "height_std": 0.02,
-            "upright_std": 0.25,
-            "pose_std": 0.3,
-            "joint_indices": _LEG_JOINTS,
-            "require_airborne_latch": True,
+            "upright_std": 0.20,
+            "pose_std": 0.35,
         },
     )
 
@@ -172,7 +174,21 @@ def make_microduck_jump_env_cfg(
         weight=-0.5,
     )
 
-    # 6. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 6. Yaw rate penalty: suppress spinning in the air without forcing leg symmetry
+    cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
+        func=microduck_mdp.jump_yaw_rate_penalty,
+        weight=-0.3,
+    )
+
+    # 7. Head pitch constraint: allows free movement within +/-30 deg for balance,
+    # charging a quadratic barrier penalty only beyond 30 deg forward or backward.
+    cfg.rewards["head_pitch_limit"] = RewardTermCfg(
+        func=microduck_mdp.head_pitch_limit_penalty,
+        weight=-2.0,
+        params={"max_angle_rad": math.radians(30.0)},
+    )
+
+    # 8. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,
@@ -190,10 +206,22 @@ def make_microduck_jump_env_cfg(
     )
 
     # ── Terminations ──────────────────────────────────────────────────────────
-    # Early reset if robot tips over beyond 60 degrees tilt
+    # Early reset if robot tips over beyond 35 degrees tilt
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation,
-        params={"limit_angle": math.radians(60.0), "asset_cfg": SceneEntityCfg("robot")},
+        params={"limit_angle": math.radians(35.0), "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # Terminate immediately if robot bounces airborne a second time after touchdown (kills skipping)
+    cfg.terminations["double_bounce"] = TerminationTermCfg(
+        func=microduck_mdp.jump_double_bounce,
+        params={"sensor_name": "feet_ground_contact"},
+    )
+
+    # Terminate immediately if head pitches beyond 40 degrees forward or backward
+    cfg.terminations["head_pitch_exceeded"] = TerminationTermCfg(
+        func=microduck_mdp.head_pitch_exceeded,
+        params={"max_angle_rad": math.radians(40.0)},
     )
 
     # ── Commands: clamp velocity commands to zero for stationary jumping ──────

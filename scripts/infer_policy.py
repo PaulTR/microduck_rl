@@ -138,7 +138,8 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None, jump_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0, jump_duration=2.0):
+                 kick_duration=3.0, roulade_duration=2.0, jump_duration=2.0,
+                 jump_once=False):
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -146,6 +147,7 @@ class PolicyInference:
         self.delay_min_lag = delay_min_lag
         self.delay_max_lag = delay_max_lag
         self.switch_threshold = switch_threshold
+        self.jump_once = jump_once
         # When True: emit the unified 13D command vector and treat head_offset /
         # body_cmd as policy COMMANDS (no add to ctrl, no joint_pos correction).
         # When False: legacy behaviour (3D command, head_offset added to ctrl[5:9]).
@@ -259,10 +261,15 @@ class PolicyInference:
             print(f"{name} policy input shape: {self.behavior_sessions[name].get_inputs()[0].shape}"
                   f"  (auto-return after {duration:.1f}s)")
 
-        # Validate at least one policy loaded. A sitstand policy can run alone
-        # (it holds the stand at flag=0), unlike the old one-way sit policy.
-        if not self.walking_session and not self.standing_session and not self.is_sitstand:
-            raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
+        # Validate at least one policy loaded. A sitstand policy or standalone jump can run alone.
+        self.jump_only = bool(
+            self.behavior_sessions.get("jump")
+            and not self.walking_session
+            and not self.standing_session
+            and not self.is_sitstand
+        )
+        if not self.walking_session and not self.standing_session and not self.is_sitstand and not self.jump_only:
+            raise ValueError("At least one of --walking, --standing, --sitstand or --jump must be provided")
 
         # Determine initial active session and policy
         if self.walking_session:
@@ -271,10 +278,13 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
+        elif self.is_sitstand:
             # sitstand-only: start standing (posture flag 0).
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        else:
+            self.current_policy = "jump"
+            self.ort_session = self.behavior_sessions["jump"]
 
         # Get input/output names from active session
         self.input_name = self.ort_session.get_inputs()[0].name
@@ -776,6 +786,11 @@ class PolicyInference:
 
     def infer(self):
         """Run policy inference and return action."""
+        if self.jump_only and self.behavior_mode is None:
+            # Holding landing/standing pose: target HOME standing pose (action 0)
+            action = np.zeros(self.n_joints, dtype=np.float32)
+            self.last_action = action.copy()
+            return action
         obs = self.get_observations()
         obs_batch = obs.reshape(1, -1)
         action = self.ort_session.run([self.output_name], {self.input_name: obs_batch})[0]
@@ -815,6 +830,7 @@ def main():
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
     parser.add_argument("--jump", type=str, default=None, help="Path to jump policy ONNX (press J to trigger). Requires --new-cmd-obs.")
+    parser.add_argument("--jump-once", action="store_true", default=False, help="Run jump policy once and hold standing landing posture (useful for standalone jump testing)")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
     parser.add_argument("--jump-duration", type=float, default=2.0, help="Seconds the jump policy stays active before handing back to standing/walking (default: 2.0)")
@@ -943,7 +959,9 @@ def main():
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
         jump_duration=args.jump_duration,
+        jump_once=args.jump_once,
     )
+    jump_once_pending = bool(args.jump_once and args.jump)
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
     # Set realistic wheel bearing friction for roller inference (must be done
@@ -1257,6 +1275,10 @@ def main():
 
                 for key in term.get_keys():
                     handle_key(key)
+
+                if jump_once_pending and (step_start - start_time) >= 0.5:
+                    policy.trigger_behavior("jump")
+                    jump_once_pending = False
 
                 if not policy_enabled and policy_enable_time is not None:
                     if step_start >= policy_enable_time:

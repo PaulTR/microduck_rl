@@ -63,7 +63,7 @@ Logs are saved under the project `mjlab_microduck` and in the local folder `logs
 ### What to check in the curves:
 1. **Total Reward / `Episode_Reward/jump_air_time`:** Should steadily climb as the policy learns to launch into the air.
 2. **`Episode_Reward/jump_height`:** Should rise as apex reaches target $z \approx 0.16\text{ m}$.
-3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`) **must evaluate to $\le 0$**.
+3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_yaw_rate`, `head_pitch_limit`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`) **must evaluate to $\le 0$**.
 4. **Episode Length:** Stays stable around 2.0 s (100 steps at 50 Hz).
 
 ---
@@ -100,14 +100,26 @@ This creates an ONNX binary (e.g. `microduck_jump.onnx`).
 
 Test the exported ONNX model on your local CPU (including your Mac!) before copying it to the physical robot's onboard computer.
 
-### Option A: Trigger Jump as a hot-swapped trick (with Walking or Standing base)
+### Option A: Run Jump Once and Return to Standing (Standalone Jump Policy)
+To run the jump policy by itself, execute the jump once on startup, and automatically settle and hold the standing landing posture (rather than continuously jumping in an infinite loop):
+
+```bash
+uv run scripts/infer_policy.py --jump <jump.onnx> --jump-once --new-cmd-obs
+```
+
+* Settles for 0.5s on startup.
+* Executes the jump maneuver once.
+* Upon landing, holds standing posture.
+* Press **`J`** in the terminal at any time to execute another jump and return to standing!
+
+### Option B: Trigger Jump as a hot-swapped trick (with Walking or Standing base)
 Load your walking or standing policy alongside the jump policy. Press **`J`** in the terminal window to trigger the jump maneuver in real-time:
 
 ```bash
 uv run scripts/infer_policy.py --standing <standing.onnx> --jump <jump.onnx> --new-cmd-obs
 ```
 
-### Option B: Run Jump policy continuously
+### Option C: Run Jump policy continuously
 Run the jump policy directly in the primary slot:
 
 ```bash
@@ -118,7 +130,7 @@ uv run scripts/infer_policy.py --walking <jump.onnx> --new-cmd-obs
 
 ## 8. Summary of Task Files
 
-- **MDP Scoring Functions:** `src/mjlab_microduck/tasks/mdp.py` (contains `jump_air_time_reward`, `jump_height_target`, `jump_launch_velocity`, `jump_landing_composite`, `jump_drift_penalty`, `jump_foot_impact_penalty`)
+- **MDP Scoring Functions:** `src/mjlab_microduck/tasks/mdp.py` (contains `jump_air_time_reward`, `jump_height_target`, `jump_launch_velocity`, `jump_compliant_landing`, `jump_drift_penalty`, `jump_yaw_rate_penalty`, `head_pitch_limit_penalty`, `jump_foot_impact_penalty`)
 - **Task Configuration:** `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`
 - **Task Registry:** `src/mjlab_microduck/tasks/__init__.py`
 - **Unit Tests:** `tests/test_jump_cfg.py` (run anytime with `uv run --with pytest pytest tests/test_jump_cfg.py`)
