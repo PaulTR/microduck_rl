@@ -1752,3 +1752,60 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 
 ---
 
+## User
+
+500 steps in i have 1.04 for landing, 0.04 and 0.03 for height and air time. seems like it's just standing there. jump launch is 0.08
+
+---
+
+## Assistant
+
+### The Diagnosis: The "1-Frame Latch Jackpot"
+
+Look at the metrics:
+> *"landing: 1.04, height: 0.04, air time: 0.03, jump launch: 0.08. Seems like it's just standing there."*
+
+### Why `landing` Was Scoring 1.04 While Standing Still:
+1. **The 1-Frame Contact Flicker:**
+   At 50 Hz, when the robot stood on its toes or vibrated at spawn, the contact sensor flickered to `found == 0` for just **one single 20-millisecond physics frame**.
+2. **The Permanent Latch Jackpot:**
+   Because the airborne latch was `latch = latch | is_airborne_now`, that single 20ms flicker flipped the latch to `True` for the **entire 2-second episode**.
+3. **The 85-Step Ground Camping:**
+   Once latched, `jump_landing` paid **4.0 points every single step** for standing in HOME pose!
+   In a 2.0s episode (100 steps), the robot realized:
+   *Flicker for 1 frame at step 2, then stand motionless on the ground for 98 steps $\implies \mathbf{390\text{ points}}$ with zero risk of falling!*
+   Why bother actually jumping high when you can cash in on the landing reward while standing on the floor?
+
+---
+
+### The Fix Applied (Commit `4782180` on `paul/jump`):
+
+1. **Destroyed the Flicker Exploit (Multi-Frame Verification):**
+   * The latch now requires being airborne at $z \ge 0.130\text{ m}$ for **at least 4 consecutive steps (80ms)**.
+   * A single noisy frame or vibration leaves the latch at `False`.
+2. **Time-Gated Landing (`min_landing_step = 16`):**
+   * `jump_landing` evaluates to **strictly $0.00$** for the first 16 steps (0.32s), regardless of latch state. You cannot claim landing rewards during the takeoff phase!
+3. **Shortened Episode to Jump Scale (`EPISODE_LENGTH_S = 1.0s` / 50 steps):**
+   * Previously, 85% of the episode was spent on the ground after the jump.
+   * At 1.0s (50 steps):
+     - Steps 0–15 (0.30s): Squat & Launch
+     - Steps 15–28 (0.26s): Airborne Flight & Apex
+     - Steps 28–50 (0.44s): Landing Absorption
+   * Flight is now **half the entire episode**. The robot can no longer farm ground-standing annuities.
+4. **Boosted Upward Launch:**
+   * `jump_launch` weight increased to **`8.0`** to kick off strong vertical momentum.
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+With the latch flicker exploit closed and landing gated to $t \ge 0.32\text{s}$, the policy **must** legitimately launch into the air to unlock any landing points!
+
+---
+
