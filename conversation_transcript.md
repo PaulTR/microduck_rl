@@ -1863,3 +1863,65 @@ With the $25^\circ$ cutoff in place, any attempt to tip forward or do a headstan
 
 ---
 
+## User
+
+This is SO VERY CLOSE! Excellent job. The one issue is that it jumps and then puts its head forward as a sort of counter balance maybe? I'd like the head to stay within 60 degrees forward or backwards if possible. Also please update the jump.md file to include a command to run the model once and return to standing rather than continuously jumping when running the finished onnx policy file.
+
+---
+
+## Assistant
+
+### Two Major Enhancements Added (Commit `b0579f8` on `paul/jump`)
+
+---
+
+### 1. Head Pitch Limit Penalty ($\pm 60^\circ$ Cone)
+
+To prevent the robot from pitching its heavy head forward as an extreme counter-weight while jumping or landing:
+
+- **Custom Penalty Function (`head_pitch_limit_penalty` in [`mdp.py`](file:///Users/paul/Documents/code/microduck_rl/src/mjlab_microduck/tasks/mdp.py)):**
+  - Measures total head pitch relative to the torso ($q_{\text{neck\_pitch}} + q_{\text{head\_pitch}}$) as well as the individual joint deflections.
+  - **Within $[-60^\circ, +60^\circ]$:** The penalty evaluates to **$0.0$** (zero tax), giving the head natural freedom of motion for balance.
+  - **Beyond $\pm 60^\circ$ ($\pm 1.047\text{ rad}$):** Applies a quadratic penalty weighted at **`-2.0`**, actively pulling the head back inside the allowed $60^\circ$ envelope.
+
+---
+
+### 2. Standalone Single-Jump & Return-to-Standing in `infer_policy.py`
+
+Previously, running `infer_policy.py` with only `--walking <jump.onnx>` forced the policy to loop continuously, and running `--jump` alone raised an error expecting a walking or standing policy to return to.
+
+We updated [`scripts/infer_policy.py`](file:///Users/paul/Documents/code/microduck_rl/scripts/infer_policy.py) to support two clean workflows:
+
+#### Option A: Run Jump Once and Hold Standing (Standalone Policy)
+Execute the jump once on startup, and automatically settle and hold the standing landing posture without needing a separate standing ONNX model:
+
+```bash
+uv run scripts/infer_policy.py --jump <jump.onnx> --jump-once --jump-duration 1.0 --new-cmd-obs
+```
+* Jumps once for 1.0s, lands, and locks in the standing HOME posture.
+* Press **`J`** in the terminal at any time to execute another jump and return to standing!
+
+#### Option B: Hot-swapped Trick (with Standing Policy)
+If you already have a trained standing ONNX model:
+
+```bash
+uv run scripts/infer_policy.py --standing <standing.onnx> --jump <jump.onnx> --jump-duration 1.0 --new-cmd-obs
+```
+* Starts in standing mode.
+* Press **`J`**: jumps once, lands, and hands control back to the active standing policy.
+
+---
+
+### Updated Documentation
+
+[`jump.md`](file:///Users/paul/Documents/code/microduck_rl/jump.md) has been updated with these commands, the $60^\circ$ head constraint notes, and the 1.0s / 50-step metrics.
+
+### Next Step on GPU Rig:
+
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+---
+
