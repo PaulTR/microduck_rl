@@ -1809,3 +1809,57 @@ With the latch flicker exploit closed and landing gated to $t \ge 0.32\text{s}$,
 
 ---
 
+## User
+
+ok its head is on the ground and feet are jittering, which is not jumping
+
+---
+
+## Assistant
+
+### The Diagnosis: The "Headstand Exploit"
+
+Look at what you observed:
+> *"head is on the ground and feet are jittering, which is not jumping"*
+
+This exact failure mode is actually called out directly in `AGENTS.md`:
+> *"RL optimizes the letter of the reward. Every under-specified degree of freedom will be exploited... **head-tripod instead of standing**."*
+
+---
+
+### How the AI Exploited This:
+
+1. **60-Degree Fall Limit Allowed Headstands:**
+   * The `fell_over` termination threshold was set to $60^\circ$ tilt.
+   * Microduck's neck and head reach the floor when tilted only $\sim 35^\circ$. Because $35^\circ < 60^\circ$, the physics engine did not consider the robot "fallen"!
+2. **The Fake "Airborne" Loophole:**
+   * By planting its head on the floor, the robot lifted its feet off the ground like an acrobat doing a headstand.
+   * The contact sensor reported `feet_ground_contact.data.found == 0` (*"both feet airborne!"*).
+   * It then rapidly twitched/jittered its ankles and knees in the air to generate upward torso velocity without ever having to balance or land!
+
+---
+
+### The Fix Applied (Commit `4e005b2` on `paul/jump`):
+
+1. **Strict Fall Termination at 25° (`limit_angle = math.radians(25.0)`):**
+   * The moment the torso tilts beyond $25^\circ$ (a slight pitch), the episode **terminates immediately**.
+   * It is now physically impossible for the head to reach the floor without dying instantly on frame 1.
+2. **Killed Foot Jittering (`action_rate_l2 = -0.3`):**
+   * Tripled the action rate penalty ($-0.1 \to \mathbf{-0.3}$) to eliminate high-frequency servo twitching.
+3. **Reinforced Vertical Torso Requirement (`upright = 1.5`, $\text{std} = 0.15$):**
+   * Boosted the upright reward with a tight $\sim 8.5^\circ$ tolerance, and updated all jump flight rewards to require strict vertical alignment ($\text{upright\_std} = 0.15$).
+
+---
+
+### How to Pull and Retrain:
+
+On your GPU machine:
+```bash
+git pull paul jump
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+```
+
+With the $25^\circ$ cutoff in place, any attempt to tip forward or do a headstand triggers instant termination, forcing the policy to stay strictly upright on its feet!
+
+---
+
