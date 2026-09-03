@@ -93,7 +93,7 @@ def test_terminations():
     """Verify early termination on extreme tilt (fell over)."""
     cfg = make_microduck_jump_env_cfg()
     assert "fell_over" in cfg.terminations
-    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(60.0)
+    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(25.0)
 
 
 def test_jump_task_registered():

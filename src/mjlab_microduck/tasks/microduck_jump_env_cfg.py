@@ -121,15 +121,17 @@ def make_microduck_jump_env_cfg(
             del cfg.curriculum[name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
+    # Strong upright reward to keep torso vertical (std 0.15 rad ≈ 8.5 deg)
     if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 0.2
-        cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
+        cfg.rewards["upright"].weight = 1.5
+        cfg.rewards["upright"].params["std"] = 0.15
 
     if "body_ang_vel" in cfg.rewards:
         cfg.rewards["body_ang_vel"].weight = -0.05
 
+    # Action smoothness: damp servo jittering and rapid foot thrashing in the air
     if "action_rate_l2" in cfg.rewards:
-        cfg.rewards["action_rate_l2"].weight = -0.1
+        cfg.rewards["action_rate_l2"].weight = -0.3
 
     # ── Add Jump Task Rewards (Dominant Mass) ──────────────────────────────────
     # 1. Initial explosive upward push-off velocity near the floor
@@ -138,22 +140,22 @@ def make_microduck_jump_env_cfg(
         weight=8.0,
         params={
             "max_height": 0.135,
-            "upright_std": 0.3,
+            "upright_std": 0.15,
         },
     )
 
-    # 2. Airborne reward: both feet fully in the air while upright
+    # 2. Airborne reward: both feet fully in the air while strictly upright
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
         weight=8.0,
         params={
             "sensor_name": "feet_ground_contact",
             "min_height": 0.125,
-            "upright_std": 0.25,
+            "upright_std": 0.15,
         },
     )
 
-    # 3. Apex height target: major reward for reaching apex z ≈ 0.150 m while AIRBORNE
+    # 3. Apex height target: major reward for reaching apex z ≈ 0.150 m while AIRBORNE and upright
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_height_target,
         weight=8.0,
@@ -161,7 +163,7 @@ def make_microduck_jump_env_cfg(
             "sensor_name": "feet_ground_contact",
             "target_height": JUMP_TARGET_APEX_Z,
             "height_std": 0.025,
-            "upright_std": 0.25,
+            "upright_std": 0.15,
         },
     )
 
@@ -174,7 +176,7 @@ def make_microduck_jump_env_cfg(
         params={
             "target_height": STAND_Z,
             "height_std": 0.02,
-            "upright_std": 0.25,
+            "upright_std": 0.15,
             "pose_std": 0.3,
             "min_landing_step": 16,
             "joint_indices": _ALL_JOINTS,
@@ -183,7 +185,7 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 5. Lateral & forward drift penalty: strictly penalize forward skittering (negative weight)
+    # 5. Lateral & forward drift penalty: strictly penalize horizontal movement (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
         weight=-2.0,
@@ -219,10 +221,10 @@ def make_microduck_jump_env_cfg(
     )
 
     # ── Terminations ──────────────────────────────────────────────────────────
-    # Early reset if robot tips over beyond 60 degrees tilt
+    # Early reset if robot tips over beyond 25 degrees tilt (kills headstands & diving)
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation,
-        params={"limit_angle": math.radians(60.0), "asset_cfg": SceneEntityCfg("robot")},
+        params={"limit_angle": math.radians(25.0), "asset_cfg": SceneEntityCfg("robot")},
     )
 
     # ── Commands: clamp velocity commands to zero for stationary jumping ──────
