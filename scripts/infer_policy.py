@@ -962,8 +962,7 @@ def main():
         jump_duration=args.jump_duration,
         jump_once=args.jump_once,
     )
-    if args.jump_once and args.jump:
-        policy.trigger_behavior("jump")
+    jump_once_pending = bool(args.jump_once and args.jump)
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
     # Set realistic wheel bearing friction for roller inference (must be done
@@ -1267,6 +1266,10 @@ def main():
 
                 for key in term.get_keys():
                     handle_key(key)
+
+                if jump_once_pending and (step_start - start_time) >= 0.5:
+                    policy.trigger_behavior("jump")
+                    jump_once_pending = False
 
                 if not policy_enabled and policy_enable_time is not None:
                     if step_start >= policy_enable_time:
