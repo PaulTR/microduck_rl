@@ -45,12 +45,12 @@ ENCODER_BIAS_RANGE                  = (-0.015, 0.015)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # ── Task constants ────────────────────────────────────────────────────────────
-# 2.0 seconds at 50 Hz = 100 control steps. Enough for squat, launch, flight, landing.
-EPISODE_LENGTH_S = 2.0
+# 1.0 second at 50 Hz = 50 control steps. Clean single jump maneuver window.
+EPISODE_LENGTH_S = 1.0
 
 # Trunk heights (m)
 STAND_Z = 0.115
-JUMP_TARGET_APEX_Z = 0.160
+JUMP_TARGET_APEX_Z = 0.148
 
 # Servo indices
 _LEG_JOINTS  = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
@@ -92,7 +92,7 @@ def make_microduck_jump_env_cfg(
 
     cfg.episode_length_s = EPISODE_LENGTH_S
 
-    # ── Drop walking-specific locomotion rewards ──────────────────────────────
+    # ── Drop walking-specific locomotion and head-look rewards ────────────────
     for name in [
         "track_linear_velocity",
         "track_angular_velocity",
@@ -101,9 +101,24 @@ def make_microduck_jump_env_cfg(
         "foot_slip",
         "air_time",
         "pose",
+        "head_pose_tracking",
+        "head_pose_bias",
+        "body_pose_tracking",
     ]:
         if name in cfg.rewards:
             del cfg.rewards[name]
+
+    # ── Drop conflicting walking-specific curricula ───────────────────────────
+    # Prevents action rate penalty from ramping up to -1.0 (which blocks explosive launch),
+    # and eliminates wide head flailing commands that contradict head pitch limits.
+    for c_name in [
+        "action_rate_weight",
+        "standing_envs",
+        "head_pose_range",
+        "head_pose_bias_weight",
+    ]:
+        if c_name in cfg.curriculum:
+            del cfg.curriculum[c_name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
     # Upright reward to keep torso vertical (weight 1.0 allows slight lean for launch)
@@ -115,22 +130,30 @@ def make_microduck_jump_env_cfg(
     if "body_ang_vel" in cfg.rewards:
         cfg.rewards["body_ang_vel"].weight = -0.05
 
-    # Action smoothness (damp high-frequency servo jitter without blocking big launch)
+    # Action smoothness: locked to gentle -0.1 to damp servo jitter without taxing explosive impulse
     if "action_rate_l2" in cfg.rewards:
         cfg.rewards["action_rate_l2"].weight = -0.1
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Initial explosive upward push-off velocity near the floor (boosted)
+    # 1. Bilateral takeoff launch velocity: requires BOTH feet on the floor to push!
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
         weight=4.0,
         params={
+            "sensor_name": "feet_ground_contact",
+            "require_both_feet_ground": True,
             "max_height": 0.135,
             "upright_std": 0.3,
         },
     )
 
-    # 2. Airborne reward: both feet fully in the air while upright (boosted)
+    # 2. Bilateral leg similarity: guides left and right legs to push symmetrically
+    cfg.rewards["leg_similarity"] = RewardTermCfg(
+        func=microduck_mdp.leg_similarity_reward,
+        weight=1.5,
+    )
+
+    # 3. Airborne reward: both feet fully in the air while upright (active until touchdown)
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
         weight=6.0,
@@ -141,7 +164,7 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 3. Apex height target: Gaussian reward for reaching apex z ≈ 0.16 m
+    # 4. Apex height target: Gaussian reward for reaching apex z ≈ 0.148 m
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_height_target,
         weight=4.0,
@@ -152,7 +175,7 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Compliant landing recovery: absorbs impact with a knee crouch upon touchdown,
+    # 5. Compliant landing recovery: absorbs impact with a knee crouch upon touchdown,
     # then smoothly extends back into an erect standing posture with upright head.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_compliant_landing,
@@ -168,19 +191,19 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 5. Lateral drift penalty: keep jump strictly vertical in-place (negative weight)
+    # 6. Lateral drift penalty: keep jump strictly vertical in-place (negative weight)
     cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_drift_penalty,
         weight=-0.5,
     )
 
-    # 6. Yaw rate penalty: suppress spinning in the air without forcing leg symmetry
+    # 7. Yaw rate penalty: suppress spinning in the air without forcing leg symmetry
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
         weight=-0.3,
     )
 
-    # 7. Head pitch constraint: allows free movement within +/-30 deg for balance,
+    # 8. Head pitch constraint: allows free movement within +/-30 deg for balance,
     # charging a quadratic barrier penalty only beyond 30 deg forward or backward.
     cfg.rewards["head_pitch_limit"] = RewardTermCfg(
         func=microduck_mdp.head_pitch_limit_penalty,
@@ -188,7 +211,7 @@ def make_microduck_jump_env_cfg(
         params={"max_angle_rad": math.radians(30.0)},
     )
 
-    # 8. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,
@@ -224,12 +247,23 @@ def make_microduck_jump_env_cfg(
         params={"max_angle_rad": math.radians(40.0)},
     )
 
-    # ── Commands: clamp velocity commands to zero for stationary jumping ──────
+    # ── Commands: clamp velocity & heading commands to zero for stationary jumping ──
     # Keeps the 13D command block active in observation space without requesting walking
     if "twist" in cfg.commands:
         cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.0)
         cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
         cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
+        cfg.commands["twist"].heading_command = False
+        cfg.commands["twist"].ranges.heading = (0.0, 0.0)
+
+    # Keep small non-zero sampling near zero to preserve 61D obs neurons alive without commanding flailing
+    if "head_pose" in cfg.commands:
+        cfg.commands["head_pose"].ranges = ((-0.01, 0.01), (-0.01, 0.01), (-0.01, 0.01), (-0.01, 0.01))
+    if "body_pose" in cfg.commands:
+        cfg.commands["body_pose"].ranges = (
+            (-0.005, 0.005), (-0.005, 0.005), (-0.005, 0.005),
+            (-0.01, 0.01), (-0.01, 0.01), (-0.01, 0.01),
+        )
 
     return cfg
 

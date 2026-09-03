@@ -25,6 +25,10 @@ def test_jump_rewards_present_and_signs():
     # Positive goal / shaping rewards
     assert "jump_launch" in cfg.rewards
     assert cfg.rewards["jump_launch"].weight > 0.0
+    assert cfg.rewards["jump_launch"].params["require_both_feet_ground"] is True
+
+    assert "leg_similarity" in cfg.rewards
+    assert cfg.rewards["leg_similarity"].weight > 0.0
 
     assert "jump_air_time" in cfg.rewards
     assert cfg.rewards["jump_air_time"].weight > 0.0
@@ -57,7 +61,7 @@ def test_jump_rewards_present_and_signs():
 
 
 def test_walking_rewards_dropped():
-    """Ensure walking locomotion tracking rewards are dropped for the jump task."""
+    """Ensure walking locomotion and head-look tracking rewards are dropped for the jump task."""
     cfg = make_microduck_jump_env_cfg()
     for walking_term in [
         "track_linear_velocity",
@@ -67,8 +71,23 @@ def test_walking_rewards_dropped():
         "foot_slip",
         "air_time",
         "pose",
+        "head_pose_tracking",
+        "head_pose_bias",
+        "body_pose_tracking",
     ]:
         assert walking_term not in cfg.rewards, f"Unexpected walking term {walking_term} found in jump rewards"
+
+
+def test_conflicting_curricula_dropped():
+    """Ensure action rate ramp and wide head pose curricula are dropped."""
+    cfg = make_microduck_jump_env_cfg()
+    for c_name in [
+        "action_rate_weight",
+        "standing_envs",
+        "head_pose_range",
+        "head_pose_bias_weight",
+    ]:
+        assert c_name not in cfg.curriculum, f"Unexpected curriculum {c_name} found in jump curriculum"
 
 
 def test_actor_observation_keeps_61d_contract():

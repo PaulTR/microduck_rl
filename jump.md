@@ -62,9 +62,10 @@ Logs are saved under the project `mjlab_microduck` and in the local folder `logs
 
 ### What to check in the curves:
 1. **Total Reward / `Episode_Reward/jump_air_time`:** Should steadily climb as the policy learns to launch into the air.
-2. **`Episode_Reward/jump_height`:** Should rise as apex reaches target $z \approx 0.16\text{ m}$.
-3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_yaw_rate`, `head_pitch_limit`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`) **must evaluate to $\le 0$**.
-4. **Episode Length:** Stays stable around 2.0 s (100 steps at 50 Hz).
+2. **`Episode_Reward/jump_height`:** Should rise as apex reaches target $z \approx 0.148\text{ m}$.
+3. **`Episode_Reward/leg_similarity`:** Stays high (~1.0–1.5) showing both legs squat and push off in unison.
+4. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_yaw_rate`, `head_pitch_limit`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`) **must evaluate to $\le 0$**.
+5. **Episode Length:** Stays stable around 1.0 s (50 steps at 50 Hz).
 
 ---
 
@@ -130,7 +131,7 @@ uv run scripts/infer_policy.py --walking <jump.onnx> --new-cmd-obs
 
 ## 8. Summary of Task Files
 
-- **MDP Scoring Functions:** `src/mjlab_microduck/tasks/mdp.py` (contains `jump_air_time_reward`, `jump_height_target`, `jump_launch_velocity`, `jump_compliant_landing`, `jump_drift_penalty`, `jump_yaw_rate_penalty`, `head_pitch_limit_penalty`, `jump_foot_impact_penalty`)
+- **MDP Scoring Functions:** `src/mjlab_microduck/tasks/mdp.py` (contains `jump_air_time_reward`, `jump_height_target`, `jump_launch_velocity`, `leg_similarity_reward`, `jump_compliant_landing`, `jump_drift_penalty`, `jump_yaw_rate_penalty`, `head_pitch_limit_penalty`, `jump_foot_impact_penalty`)
 - **Task Configuration:** `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`
 - **Task Registry:** `src/mjlab_microduck/tasks/__init__.py`
 - **Unit Tests:** `tests/test_jump_cfg.py` (run anytime with `uv run --with pytest pytest tests/test_jump_cfg.py`)

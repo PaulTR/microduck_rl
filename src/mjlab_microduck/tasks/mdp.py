@@ -7313,7 +7313,7 @@ def jump_air_time_reward(
 def jump_height_target(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    target_height: float = 0.160,
+    target_height: float = 0.148,
     height_std: float = 0.025,
     upright_std: float = 0.25,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -7346,6 +7346,8 @@ def jump_height_target(
 
 def jump_launch_velocity(
     env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    require_both_feet_ground: bool = True,
     max_height: float = 0.135,
     upright_std: float = 0.3,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -7353,8 +7355,9 @@ def jump_launch_velocity(
     """Reward positive upward vertical velocity vz while near the ground during takeoff.
 
     Turns off permanently once airborne or landed to ensure only ONE jump launch.
+    Requires BOTH feet on the ground so one-legged kicks receive 0.0 reward!
     """
-    _update_jump_state(env, asset_cfg=asset_cfg)
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
     latch, count, touchdown, td_step = _jump_state(env)
     active = (~latch) & (~touchdown)
 
@@ -7365,11 +7368,47 @@ def jump_launch_velocity(
     vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
     upward_vz = torch.clamp(vz, min=0.0)
 
+    # Bilateral ground contact: both feet must be in contact during takeoff push!
+    if require_both_feet_ground and sensor_name in env.scene.sensors:
+        found = env.scene.sensors[sensor_name].data.found
+        both_feet_ground = (found.view(found.shape[0], -1) > 0).all(dim=-1).float()
+    else:
+        both_feet_ground = 1.0
+
     quat = asset.data.root_link_quat_w
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return upward_vz * (z < max_height).float() * upright_g * active.float()
+    return upward_vz * (z < max_height).float() * upright_g * both_feet_ground * active.float()
+
+
+def leg_similarity_reward(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    joint_bases: tuple = ("hip_pitch", "knee", "ankle"),
+) -> torch.Tensor:
+    """Soft guidance encouraging left and right leg positions to be similar.
+
+    Provides a smooth Gaussian reward exp(-diff / 0.3) so both legs push together
+    without imposing rigid mathematical symmetry constraints.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    if not hasattr(env, "_leg_sim_ids"):
+        left, right = [], []
+        for base in joint_bases:
+            li, _ = asset.find_joints([f"left_{base}"])
+            ri, _ = asset.find_joints([f"right_{base}"])
+            left.append(li[0])
+            right.append(ri[0])
+        env._leg_sim_ids = (
+            torch.tensor(left, device=env.device),
+            torch.tensor(right, device=env.device),
+        )
+    lids, rids = env._leg_sim_ids
+    q = asset.data.joint_pos
+    # Sagittal joints have opposite signs on left vs right in HOME frame
+    diff = torch.abs(q[:, lids] + q[:, rids]).mean(dim=-1)
+    return torch.exp(-diff / 0.3)
 
 
 def jump_compliant_landing(
