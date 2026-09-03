@@ -130,3 +130,11 @@ def test_landing_is_gated_on_airborne_latch():
     assert cfg.rewards["jump_landing"].func == microduck_mdp.jump_compliant_landing
     assert "reset_jump_state" in cfg.events
 
+
+def test_twist_command_heading_none():
+    """Verify heading_command is False and ranges.heading is None to satisfy mjlab validator."""
+    cfg = make_microduck_jump_env_cfg()
+    assert cfg.commands["twist"].heading_command is False
+    assert cfg.commands["twist"].ranges.heading is None
+
+

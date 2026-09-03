@@ -254,7 +254,9 @@ def make_microduck_jump_env_cfg(
         cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
         cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
         cfg.commands["twist"].heading_command = False
-        cfg.commands["twist"].ranges.heading = (0.0, 0.0)
+        cfg.commands["twist"].ranges.heading = None
+        cfg.commands["twist"].rel_standing_envs = 0.0
+        cfg.commands["twist"].rel_heading_envs = 0.0
 
     # Keep small non-zero sampling near zero to preserve 61D obs neurons alive without commanding flailing
     if "head_pose" in cfg.commands:
