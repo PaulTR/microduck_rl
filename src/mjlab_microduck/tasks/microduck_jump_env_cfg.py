@@ -213,11 +213,18 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 9. Head pitch envelope constraint: strictly penalize head pitch beyond +/- 60 deg
+    # 9. Head pitch envelope constraint: strictly penalize head pitch beyond +/- 30 deg (front/back axis)
     cfg.rewards["head_pitch_limit"] = RewardTermCfg(
         func=microduck_mdp.head_pitch_limit_penalty,
+        weight=-4.0,
+        params={"max_angle_rad": math.radians(30.0)},
+    )
+
+    # 10. Rebound penalty: penalize feet leaving the ground after landing (kills multiple bounces)
+    cfg.rewards["jump_rebound_penalty"] = RewardTermCfg(
+        func=microduck_mdp.jump_rebound_penalty,
         weight=-2.0,
-        params={"max_angle_rad": math.radians(60.0)},
+        params={"sensor_name": "feet_ground_contact"},
     )
 
     # ── Events ────────────────────────────────────────────────────────────────
@@ -232,6 +239,18 @@ def make_microduck_jump_env_cfg(
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation,
         params={"limit_angle": math.radians(25.0), "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # Terminate immediately if robot bounces airborne a second time after touchdown
+    cfg.terminations["double_bounce"] = TerminationTermCfg(
+        func=microduck_mdp.jump_double_bounce,
+        params={"sensor_name": "feet_ground_contact"},
+    )
+
+    # Terminate immediately if head swings beyond 40 degrees forward or backward
+    cfg.terminations["head_pitch_exceeded"] = TerminationTermCfg(
+        func=microduck_mdp.head_pitch_exceeded,
+        params={"max_angle_rad": math.radians(40.0)},
     )
 
     # ── Commands: clamp velocity commands to zero for stationary jumping ──────

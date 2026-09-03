@@ -7206,12 +7206,13 @@ def roulade_lateral_velocity_penalty(
 #   - jump_landing_composite: strictly 0.0 until airborne latch is earned.
 
 
-def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
+def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if not hasattr(env, "_jump_airborne_latch"):
         env._jump_airborne_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._jump_airborne_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env._jump_touchdown_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._jump_last_update_step = -1
-    return env._jump_airborne_latch, env._jump_airborne_count
+    return env._jump_airborne_latch, env._jump_airborne_count, env._jump_touchdown_latch
 
 
 def _update_jump_state(
@@ -7221,16 +7222,18 @@ def _update_jump_state(
     min_airborne_steps: int = 4,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
-    """Check if the robot has achieved genuine flight and latch the airborne flag."""
-    latch, count = _jump_state(env)
+    """Check if the robot has achieved genuine flight and track single-jump lifecycle."""
+    latch, count, touchdown = _jump_state(env)
     step = int(env.common_step_counter)
     if step != env._jump_last_update_step:
         asset: Entity = env.scene[asset_cfg.name]
         if sensor_name in env.scene.sensors:
             found = env.scene.sensors[sensor_name].data.found
             both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
+            feet_on_ground = ~both_feet_airborne
         else:
             both_feet_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            feet_on_ground = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
         z = torch.nan_to_num(
             asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
@@ -7242,13 +7245,17 @@ def _update_jump_state(
         upright_ok = tilt_sq < 0.25
 
         is_airborne_now = both_feet_airborne & height_ok & upright_ok
-        # Accumulate genuine airborne steps
-        count[:] = torch.where(is_airborne_now, count + 1, count)
+        # Accumulate genuine airborne steps before touchdown
+        count[:] = torch.where(is_airborne_now & (~touchdown), count + 1, count)
 
         # Latch flips True ONLY if robot was in the air for at least min_airborne_steps
-        # (kills single-frame contact noise and tiptoe contact flickers)
         legit_flight = count >= min_airborne_steps
         latch[:] = latch | legit_flight
+
+        # Touchdown occurs when robot makes contact with ground AFTER flight
+        has_landed = latch & feet_on_ground
+        touchdown[:] = touchdown | has_landed
+
         env._jump_last_update_step = step
 
 
@@ -7256,12 +7263,13 @@ def reset_jump_state(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor,
 ) -> None:
-    """Reset the jump airborne latch on episode reset."""
+    """Reset the jump state on episode reset."""
     if env_ids is None or len(env_ids) == 0:
         return
-    latch, count = _jump_state(env)
+    latch, count, touchdown = _jump_state(env)
     latch[env_ids] = False
     count[env_ids] = 0
+    touchdown[env_ids] = False
     env._jump_last_update_step = -1
 
 
@@ -7269,10 +7277,15 @@ def jump_air_time_reward(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
     min_height: float = 0.125,
-    upright_std: float = 0.25,
+    upright_std: float = 0.15,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward for being airborne with an upright torso."""
+    """Reward for being airborne with an upright torso during the single jump.
+
+    Turns OFF permanently once touchdown occurs (kills multiple bounces).
+    """
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
+    latch, count, touchdown = _jump_state(env)
     asset: Entity = env.scene[asset_cfg.name]
     if sensor_name not in env.scene.sensors:
         return torch.zeros(env.num_envs, device=env.device)
@@ -7289,7 +7302,8 @@ def jump_air_time_reward(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_score = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return both_feet_airborne * height_gate * upright_score
+    # Active ONLY before touchdown
+    return both_feet_airborne * height_gate * upright_score * (~touchdown).float()
 
 
 def jump_height_target(
@@ -7297,13 +7311,15 @@ def jump_height_target(
     sensor_name: str = "feet_ground_contact",
     target_height: float = 0.150,
     height_std: float = 0.025,
-    upright_std: float = 0.25,
+    upright_std: float = 0.15,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Gaussian reward for reaching apex height while upright AND AIRBORNE.
+    """Gaussian reward for apex height while airborne during first jump.
 
-    Gated on both feet being off the ground so standing on tiptoes pays 0.0!
+    Turns OFF permanently once touchdown occurs.
     """
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
+    latch, count, touchdown = _jump_state(env)
     asset: Entity = env.scene[asset_cfg.name]
     if sensor_name in env.scene.sensors:
         found = env.scene.sensors[sensor_name].data.found
@@ -7320,16 +7336,24 @@ def jump_height_target(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return both_feet_airborne * height_g * upright_g
+    # Active ONLY before touchdown
+    return both_feet_airborne * height_g * upright_g * (~touchdown).float()
 
 
 def jump_launch_velocity(
     env: ManagerBasedRlEnv,
     max_height: float = 0.135,
-    upright_std: float = 0.3,
+    upright_std: float = 0.15,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward positive upward vertical velocity vz while near the ground."""
+    """Reward positive upward vertical velocity vz while near the ground during takeoff.
+
+    Turns OFF permanently once airborne or landed to ensure only ONE jump launch.
+    """
+    _update_jump_state(env, asset_cfg=asset_cfg)
+    latch, count, touchdown = _jump_state(env)
+    active = (~latch) & (~touchdown)
+
     asset: Entity = env.scene[asset_cfg.name]
     z = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
@@ -7341,14 +7365,14 @@ def jump_launch_velocity(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return upward_vz * (z < max_height).float() * upright_g
+    return upward_vz * (z < max_height).float() * upright_g * active.float()
 
 
 def jump_landing_composite(
     env: ManagerBasedRlEnv,
     target_height: float = 0.115,
     height_std: float = 0.02,
-    upright_std: float = 0.25,
+    upright_std: float = 0.15,
     pose_std: float = 0.3,
     min_landing_step: int = 16,
     joint_indices: list = None,
@@ -7454,15 +7478,47 @@ def jump_yaw_rate_penalty(
     return torch.nan_to_num(omega_b[:, 2].pow(2), nan=0.0)
 
 
-def head_pitch_limit_penalty(
+def jump_rebound_penalty(
     env: ManagerBasedRlEnv,
-    max_angle_rad: float = math.radians(60.0),
+    sensor_name: str = "feet_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Penalize head pitch exceeding max_angle_rad (default 60 deg) forward or backward.
+    """Penalize feet leaving the ground or bouncing after touchdown.
 
-    Computes total head pitch (neck_pitch + head_pitch) and individual pitch joint
-    angles, charging a quadratic cost on any angle deviating beyond max_angle_rad.
+    Returns >= 0 (use negative weight in cfg).
+    """
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
+    latch, count, touchdown = _jump_state(env)
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    found = env.scene.sensors[sensor_name].data.found
+    foot_off_ground = (found.view(found.shape[0], -1) == 0).any(dim=-1).float()
+    return touchdown.float() * foot_off_ground
+
+
+def jump_double_bounce(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate episode if robot goes airborne again after touchdown (kills multiple bounces)."""
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
+    latch, count, touchdown = _jump_state(env)
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    found = env.scene.sensors[sensor_name].data.found
+    both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
+    return touchdown & both_feet_airborne
+
+
+def head_pitch_limit_penalty(
+    env: ManagerBasedRlEnv,
+    max_angle_rad: float = math.radians(30.0),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize head pitch exceeding max_angle_rad (30 deg) forward or backward.
+
+    Restricts front/back movement of neck_pitch and head_pitch to within +/-30 deg.
     Returns >= 0 (use negative weight in cfg).
     """
     asset: Entity = env.scene[asset_cfg.name]
@@ -7481,6 +7537,27 @@ def head_pitch_limit_penalty(
     excess_head = torch.clamp(torch.abs(q_head) - max_angle_rad, min=0.0)
 
     return excess_total.pow(2) + excess_neck.pow(2) + excess_head.pow(2)
+
+
+def head_pitch_exceeded(
+    env: ManagerBasedRlEnv,
+    max_angle_rad: float = math.radians(40.0),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate episode if head pitches beyond max_angle_rad (40 deg) forward or backward."""
+    asset: Entity = env.scene[asset_cfg.name]
+    if not hasattr(env, "_head_pitch_jnt_ids"):
+        n_id, _ = asset.find_joints(r"^(?!passive_).*neck_pitch.*")
+        h_id, _ = asset.find_joints(r"^(?!passive_).*head_pitch.*")
+        env._head_pitch_jnt_ids = (n_id[0], h_id[0])
+    nid, hid = env._head_pitch_jnt_ids
+    q = asset.data.joint_pos
+    q_neck = q[:, nid]
+    q_head = q[:, hid]
+    total_pitch = q_neck + q_head
+    bad = (torch.abs(total_pitch) > max_angle_rad) | (torch.abs(q_neck) > max_angle_rad) | (torch.abs(q_head) > max_angle_rad)
+    return bad
+
 
 
 

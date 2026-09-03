@@ -57,7 +57,10 @@ def test_jump_rewards_present_and_signs():
 
     assert "head_pitch_limit" in cfg.rewards
     assert cfg.rewards["head_pitch_limit"].weight < 0.0
-    assert cfg.rewards["head_pitch_limit"].params["max_angle_rad"] == math.radians(60.0)
+    assert cfg.rewards["head_pitch_limit"].params["max_angle_rad"] == math.radians(30.0)
+
+    assert "jump_rebound_penalty" in cfg.rewards
+    assert cfg.rewards["jump_rebound_penalty"].weight < 0.0
 
 
 def test_walking_rewards_dropped():
@@ -94,10 +97,14 @@ def test_actor_observation_keeps_61d_contract():
 
 
 def test_terminations():
-    """Verify early termination on extreme tilt (fell over)."""
+    """Verify early termination on extreme tilt, double bounce, and head pitch excursion."""
     cfg = make_microduck_jump_env_cfg()
     assert "fell_over" in cfg.terminations
     assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(25.0)
+
+    assert "double_bounce" in cfg.terminations
+    assert "head_pitch_exceeded" in cfg.terminations
+    assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(40.0)
 
 
 def test_jump_task_registered():

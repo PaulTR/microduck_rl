@@ -63,7 +63,7 @@ Logs are saved under the project `mjlab_microduck` and in the local folder `logs
 ### What to check in the curves:
 1. **Total Reward / `Episode_Reward/jump_air_time`:** Should steadily climb as the policy learns to launch into the air.
 2. **`Episode_Reward/jump_height`:** Should rise as apex reaches target $z \approx 0.150\text{ m}$.
-3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`, `head_pitch_limit`) **must evaluate to $\le 0$**.
+3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`, `head_pitch_limit`, `jump_rebound_penalty`) **must evaluate to $\le 0$**.
 4. **Episode Length:** Stays stable around 1.0 s (50 steps at 50 Hz).
 
 ---
