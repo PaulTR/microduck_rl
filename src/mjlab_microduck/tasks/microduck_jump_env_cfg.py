@@ -213,6 +213,13 @@ def make_microduck_jump_env_cfg(
         },
     )
 
+    # 9. Head pitch envelope constraint: strictly penalize head pitch beyond +/- 60 deg
+    cfg.rewards["head_pitch_limit"] = RewardTermCfg(
+        func=microduck_mdp.head_pitch_limit_penalty,
+        weight=-2.0,
+        params={"max_angle_rad": math.radians(60.0)},
+    )
+
     # ── Events ────────────────────────────────────────────────────────────────
     # Reset the airborne latch on every episode reset
     cfg.events["reset_jump_state"] = EventTermCfg(

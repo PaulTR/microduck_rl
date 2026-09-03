@@ -138,7 +138,8 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None, jump_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0, jump_duration=2.0):
+                 kick_duration=3.0, roulade_duration=2.0, jump_duration=1.0,
+                 jump_once=False):
         self.model = model
         self.data = data
         self.action_scale = action_scale
@@ -259,10 +260,11 @@ class PolicyInference:
             print(f"{name} policy input shape: {self.behavior_sessions[name].get_inputs()[0].shape}"
                   f"  (auto-return after {duration:.1f}s)")
 
-        # Validate at least one policy loaded. A sitstand policy can run alone
-        # (it holds the stand at flag=0), unlike the old one-way sit policy.
-        if not self.walking_session and not self.standing_session and not self.is_sitstand:
-            raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
+        # Validate at least one policy loaded.
+        self.jump_only = ("jump" in self.behavior_sessions and not self.walking_session and not self.standing_session and not self.is_sitstand)
+        self.jump_once = jump_once
+        if not self.walking_session and not self.standing_session and not self.is_sitstand and not self.jump_only:
+            raise ValueError("At least one of --walking, --standing, --sitstand or --jump must be provided")
 
         # Determine initial active session and policy
         if self.walking_session:
@@ -271,10 +273,12 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
-            # sitstand-only: start standing (posture flag 0).
+        elif self.is_sitstand:
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        elif self.jump_only:
+            self.current_policy = "standing"
+            self.ort_session = self.behavior_sessions["jump"]
 
         # Get input/output names from active session
         self.input_name = self.ort_session.get_inputs()[0].name
@@ -718,10 +722,13 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
+        elif self.is_sitstand:
             # sitstand-only setup: the sitstand policy holds the stand (flag 0).
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        elif self.jump_only:
+            self.current_policy = "standing"
+            self.ort_session = self.behavior_sessions["jump"]
         self._update_command()
         print(f"{name}: done → back to {self.current_policy}")
 
@@ -733,36 +740,40 @@ class PolicyInference:
         Sitstand policy (--sitstand): Y just flips the posture flag — the SAME
         policy sits, holds the sit, and stands back up gently (trained response
         to a flag flip is a ~2 s glide). The session stays active after
-        standing (it holds the stand); a velocity command switches back to
-        walking/standing as usual.
+        standing back up.
         """
-        if self.sit_session is None:
-            print("Sit unavailable: no --sit/--sitstand policy loaded")
-            return
-        if self.ground_pick_mode:
-            print("Cannot sit during ground pick")
+        if not self.sit_session:
+            print("Sit unavailable: no --sit or --sitstand policy loaded")
             return
         if self.behavior_mode is not None:
             print(f"Cannot sit during {self.behavior_mode}")
             return
+        if self.ground_pick_mode:
+            print("Cannot sit during ground pick")
+            return
+        if self.slope_mode:
+            print("Cannot sit during slope mode")
+            return
+
         self.sit_mode = not self.sit_mode
         if self.sit_mode:
-            self.vel_cmd = np.zeros(3, dtype=np.float32)
+            print(f"{'Sitstand' if self.is_sitstand else 'Sit'}: ON")
             self.current_policy = "sit"
             self.ort_session = self.sit_session
-            print("Sit: ON" + (" (sitstand flag=1; Y again to stand up)" if self.is_sitstand else ""))
-        elif self.is_sitstand:
-            # Stay on the sitstand session — it stands up itself (flag → 0).
-            # Do NOT swap to the standing policy here: it would take over
-            # mid-rise from a seated state it wasn't trained on.
-            print("Sit: OFF → sitstand policy standing up (flag=0)")
+            self.vel_cmd = np.zeros(3, dtype=np.float32)
+            self._update_command()
         else:
-            if self.standing_session:
+            print(f"{'Sitstand' if self.is_sitstand else 'Sit'}: OFF (standing back up)")
+            if self.is_sitstand:
+                # Same policy handles the stand-up glide (posture flag 0).
+                self._update_command()
+            elif self.standing_session:
                 self.current_policy = "standing"
+                self.ort_session = self.standing_session
             else:
                 self.current_policy = "walking"
-            self.ort_session = self.standing_session if self.current_policy == "standing" else self.walking_session
-            print(f"Sit: OFF → back to {self.current_policy}")
+                self.ort_session = self.walking_session
+                self.vel_cmd = np.zeros(3, dtype=np.float32)
         self._update_command()
 
     def toggle_head_mode(self):
@@ -776,6 +787,11 @@ class PolicyInference:
 
     def infer(self):
         """Run policy inference and return action."""
+        if self.jump_only and self.behavior_mode is None:
+            # Holding landing/standing pose: target HOME standing pose (action 0)
+            action = np.zeros(self.n_joints, dtype=np.float32)
+            self.last_action = action.copy()
+            return action
         obs = self.get_observations()
         obs_batch = obs.reshape(1, -1)
         action = self.ort_session.run([self.output_name], {self.input_name: obs_batch})[0]
@@ -815,9 +831,10 @@ def main():
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
     parser.add_argument("--jump", type=str, default=None, help="Path to jump policy ONNX (press J to trigger). Requires --new-cmd-obs.")
+    parser.add_argument("--jump-once", action="store_true", default=False, help="Run jump policy once and hold standing landing posture (useful for standalone jump testing)")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
-    parser.add_argument("--jump-duration", type=float, default=2.0, help="Seconds the jump policy stays active before handing back to standing/walking (default: 2.0)")
+    parser.add_argument("--jump-duration", type=float, default=1.0, help="Seconds the jump policy stays active before handing back to standing/walking (default: 1.0)")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")
@@ -943,7 +960,10 @@ def main():
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
         jump_duration=args.jump_duration,
+        jump_once=args.jump_once,
     )
+    if args.jump_once and args.jump:
+        policy.trigger_behavior("jump")
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
     # Set realistic wheel bearing friction for roller inference (must be done
@@ -1043,7 +1063,6 @@ def main():
     policy_enabled = not args.record
     policy_enable_time = None
     original_kp = None
-    speed_multiplier = 1.0
     if args.record:
         original_kp = model.actuator_gainprm[:, 0].copy()
 
@@ -1188,15 +1207,8 @@ def main():
                     policy.head_offset[0] = np.clip(policy.head_offset[0] - policy.head_step, -policy.head_max, policy.head_max)
                     policy._update_command()
                     print(f"Head offset: neck={policy.head_offset[0]:.2f} pitch={policy.head_offset[1]:.2f} yaw={policy.head_offset[2]:.2f} roll={policy.head_offset[3]:.2f}")
-            elif key in ("+", "=", "]"):
-                speed_multiplier = min(speed_multiplier * 2.0, 32.0)
-                print(f"Playback speed: {speed_multiplier:.2f}x")
-            elif key in ("-", "_", "["):
-                speed_multiplier = max(speed_multiplier / 2.0, 0.0625)
-                print(f"Playback speed: {speed_multiplier:.2f}x")
-            elif key == "0":
-                speed_multiplier = 1.0
-                print(f"Playback speed: 1.00x (reset)")
+                elif policy.body_pose_mode and policy.new_cmd_obs:
+                    policy.bump_body("yaw", -policy.body_cmd_step_angle)
         except Exception as e:
             print(f"Key press error: {e}")
 
@@ -1211,8 +1223,6 @@ def main():
         print("  LEFT/RIGHT arrow: strafe left/right (lin_vel_y)")
         print("  A / E:            turn left/right (ang_vel_z)")
     print("  SPACE:            coast (zero all commands)")
-    print("  + / -  or  ] / [: speed up / slow down playback (e.g. 2x, 4x, 0.5x)")
-    print("  0:                reset playback speed to 1.0x")
     print("  T:                toggle policy inference on/off (paused = motors hold last target)")
     print("  G:                trigger ground pick (requires --ground-pick)")
     print("  Y:                toggle sit (with --sit/--sitstand) or slope mode (with --slope)")
@@ -1368,8 +1378,7 @@ def main():
                 viewer.sync()
 
                 elapsed = time.time() - step_start
-                target_dt = control_dt / max(speed_multiplier, 1e-4)
-                sleep_time = target_dt - elapsed
+                sleep_time = control_dt - elapsed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 

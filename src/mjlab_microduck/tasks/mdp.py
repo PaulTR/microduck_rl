@@ -7454,5 +7454,35 @@ def jump_yaw_rate_penalty(
     return torch.nan_to_num(omega_b[:, 2].pow(2), nan=0.0)
 
 
+def head_pitch_limit_penalty(
+    env: ManagerBasedRlEnv,
+    max_angle_rad: float = math.radians(60.0),
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalize head pitch exceeding max_angle_rad (default 60 deg) forward or backward.
+
+    Computes total head pitch (neck_pitch + head_pitch) and individual pitch joint
+    angles, charging a quadratic cost on any angle deviating beyond max_angle_rad.
+    Returns >= 0 (use negative weight in cfg).
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    if not hasattr(env, "_head_pitch_jnt_ids"):
+        n_id, _ = asset.find_joints(r"^(?!passive_).*neck_pitch.*")
+        h_id, _ = asset.find_joints(r"^(?!passive_).*head_pitch.*")
+        env._head_pitch_jnt_ids = (n_id[0], h_id[0])
+    nid, hid = env._head_pitch_jnt_ids
+    q = asset.data.joint_pos
+    q_neck = q[:, nid]
+    q_head = q[:, hid]
+    total_pitch = q_neck + q_head
+
+    excess_total = torch.clamp(torch.abs(total_pitch) - max_angle_rad, min=0.0)
+    excess_neck = torch.clamp(torch.abs(q_neck) - max_angle_rad, min=0.0)
+    excess_head = torch.clamp(torch.abs(q_head) - max_angle_rad, min=0.0)
+
+    return excess_total.pow(2) + excess_neck.pow(2) + excess_head.pow(2)
+
+
+
 
 

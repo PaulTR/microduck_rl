@@ -55,6 +55,10 @@ def test_jump_rewards_present_and_signs():
     assert "action_rate_l2" in cfg.rewards
     assert cfg.rewards["action_rate_l2"].weight < 0.0
 
+    assert "head_pitch_limit" in cfg.rewards
+    assert cfg.rewards["head_pitch_limit"].weight < 0.0
+    assert cfg.rewards["head_pitch_limit"].params["max_angle_rad"] == math.radians(60.0)
+
 
 def test_walking_rewards_dropped():
     """Ensure walking locomotion tracking rewards are dropped for the jump task."""
