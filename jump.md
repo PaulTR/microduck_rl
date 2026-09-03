@@ -62,9 +62,9 @@ Logs are saved under the project `mjlab_microduck` and in the local folder `logs
 
 ### What to check in the curves:
 1. **Total Reward / `Episode_Reward/jump_air_time`:** Should steadily climb as the policy learns to launch into the air.
-2. **`Episode_Reward/jump_height`:** Should rise as apex reaches target $z \approx 0.150\text{ m}$.
-3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`, `head_pitch_limit`, `jump_rebound_penalty`) **must evaluate to $\le 0$**.
-4. **Episode Length:** Stays stable around 1.0 s (50 steps at 50 Hz).
+2. **`Episode_Reward/jump_height`:** Should rise as apex reaches target $z \approx 0.16\text{ m}$.
+3. **Penalties Check (The Golden Rule):** Every penalty metric (`jump_drift_penalty`, `jump_foot_impact`, `action_rate_l2`, `body_ang_vel`, `self_collisions`) **must evaluate to $\le 0$**.
+4. **Episode Length:** Stays stable around 2.0 s (100 steps at 50 Hz).
 
 ---
 
@@ -100,29 +100,15 @@ This creates an ONNX binary (e.g. `microduck_jump.onnx`).
 
 Test the exported ONNX model on your local CPU (including your Mac!) before copying it to the physical robot's onboard computer.
 
-### Option A: Run Jump Once and Return to Standing (Standalone Jump Policy)
-To run the jump policy by itself, execute the jump once on startup, and automatically settle and hold the standing landing posture (rather than continuously jumping in an infinite loop):
+### Option A: Trigger Jump as a hot-swapped trick (with Walking or Standing base)
+Load your walking or standing policy alongside the jump policy. Press **`J`** in the terminal window to trigger the jump maneuver in real-time:
 
 ```bash
-uv run scripts/infer_policy.py --jump <jump.onnx> --jump-once --jump-duration 1.0 --new-cmd-obs
+uv run scripts/infer_policy.py --standing <standing.onnx> --jump <jump.onnx> --new-cmd-obs
 ```
 
-* The robot will execute the jump maneuver once for 1.0 second.
-* Upon landing, it automatically locks and holds the standing posture.
-* You can press **`J`** in the terminal at any time to execute another jump and return to standing!
-
-### Option B: Trigger Jump as a hot-swapped trick (with Standing/Walking base)
-If you have a trained standing or walking ONNX model, load it as the base policy alongside `--jump`. Microduck will stand/walk until you press **`J`**, at which point it jumps once and seamlessly hands control back to standing:
-
-```bash
-uv run scripts/infer_policy.py --standing <standing.onnx> --jump <jump.onnx> --jump-duration 1.0 --new-cmd-obs
-```
-
-* Starts in standing mode.
-* Press **`J`** in the terminal: runs the jump policy for 1.0s, lands, and hands control back to standing.
-
-### Option C: Run Jump policy continuously
-If you want to evaluate repeated jumps in a continuous loop:
+### Option B: Run Jump policy continuously
+Run the jump policy directly in the primary slot:
 
 ```bash
 uv run scripts/infer_policy.py --walking <jump.onnx> --new-cmd-obs
@@ -132,7 +118,7 @@ uv run scripts/infer_policy.py --walking <jump.onnx> --new-cmd-obs
 
 ## 8. Summary of Task Files
 
-- **MDP Scoring Functions:** `src/mjlab_microduck/tasks/mdp.py` (contains `jump_air_time_reward`, `jump_height_target`, `jump_launch_velocity`, `jump_landing_composite`, `jump_drift_penalty`, `jump_foot_impact_penalty`, `head_pitch_limit_penalty`)
+- **MDP Scoring Functions:** `src/mjlab_microduck/tasks/mdp.py` (contains `jump_air_time_reward`, `jump_height_target`, `jump_launch_velocity`, `jump_landing_composite`, `jump_drift_penalty`, `jump_foot_impact_penalty`)
 - **Task Configuration:** `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`
 - **Task Registry:** `src/mjlab_microduck/tasks/__init__.py`
 - **Unit Tests:** `tests/test_jump_cfg.py` (run anytime with `uv run --with pytest pytest tests/test_jump_cfg.py`)

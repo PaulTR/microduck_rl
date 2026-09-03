@@ -36,31 +36,16 @@ def test_jump_rewards_present_and_signs():
     assert "jump_landing" in cfg.rewards
     assert cfg.rewards["jump_landing"].weight > 0.0
     assert cfg.rewards["jump_landing"].params["target_height"] == STAND_Z
-    assert cfg.rewards["jump_landing"].params["min_landing_step"] == 16
-    assert cfg.rewards["jump_landing"].params["target_overrides"] == {5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0}
-
-    assert "leg_similarity" in cfg.rewards
-    assert cfg.rewards["leg_similarity"].weight > 0.0
 
     # Negative penalty / cost terms
     assert "jump_drift_penalty" in cfg.rewards
     assert cfg.rewards["jump_drift_penalty"].weight < 0.0
-
-    assert "jump_yaw_rate" in cfg.rewards
-    assert cfg.rewards["jump_yaw_rate"].weight < 0.0
 
     assert "jump_foot_impact" in cfg.rewards
     assert cfg.rewards["jump_foot_impact"].weight < 0.0
 
     assert "action_rate_l2" in cfg.rewards
     assert cfg.rewards["action_rate_l2"].weight < 0.0
-
-    assert "head_pitch_limit" in cfg.rewards
-    assert cfg.rewards["head_pitch_limit"].weight < 0.0
-    assert cfg.rewards["head_pitch_limit"].params["max_angle_rad"] == math.radians(30.0)
-
-    assert "jump_rebound_penalty" in cfg.rewards
-    assert cfg.rewards["jump_rebound_penalty"].weight < 0.0
 
 
 def test_walking_rewards_dropped():
@@ -74,9 +59,6 @@ def test_walking_rewards_dropped():
         "foot_slip",
         "air_time",
         "pose",
-        "head_pose_tracking",
-        "head_pose_bias",
-        "body_pose_tracking",
     ]:
         assert walking_term not in cfg.rewards, f"Unexpected walking term {walking_term} found in jump rewards"
 
@@ -97,14 +79,10 @@ def test_actor_observation_keeps_61d_contract():
 
 
 def test_terminations():
-    """Verify early termination on extreme tilt, double bounce, and head pitch excursion."""
+    """Verify early termination on extreme tilt (fell over)."""
     cfg = make_microduck_jump_env_cfg()
     assert "fell_over" in cfg.terminations
-    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(25.0)
-
-    assert "double_bounce" in cfg.terminations
-    assert "head_pitch_exceeded" in cfg.terminations
-    assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(40.0)
+    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(60.0)
 
 
 def test_jump_task_registered():
@@ -119,14 +97,4 @@ def test_landing_is_gated_on_airborne_latch():
     cfg = make_microduck_jump_env_cfg()
     assert cfg.rewards["jump_landing"].params["require_airborne_latch"] is True
     assert "reset_jump_state" in cfg.events
-
-
-def test_curricula_clean():
-    """Verify that curricula do not reference deleted reward terms."""
-    cfg = make_microduck_jump_env_cfg()
-    assert "head_pose_bias_weight" not in cfg.curriculum
-    assert "standing_envs" not in cfg.curriculum
-    assert "head_pose_range" not in cfg.curriculum
-    assert "body_pose_range" not in cfg.curriculum
-
 
