@@ -20,8 +20,8 @@ Key design points:
 import math
 from copy import deepcopy
 
-# Left/Right symmetry can be enabled if desired (symmetric task). Left OFF by default.
-ENABLE_SYMMETRY = False
+# Left/Right symmetry enabled for bilateral forward broad jump
+ENABLE_SYMMETRY = True
 
 # ── Domain randomisation (matched to velocity / standup for sim2real parity) ───
 ENABLE_COM_RANDOMIZATION             = True
@@ -31,7 +31,7 @@ ENABLE_KD_RANDOMIZATION              = False
 ENABLE_MASS_INERTIA_RANDOMIZATION    = True
 ENABLE_JOINT_FRICTION_RANDOMIZATION  = True
 ENABLE_ARMATURE_RANDOMIZATION        = True
-ENABLE_VELOCITY_PUSHES               = False  # Disabled for jumping to keep trajectory vertical
+ENABLE_VELOCITY_PUSHES               = False  # Disabled for jumping to keep trajectory clean
 ENABLE_IMU_ORIENTATION_RANDOMIZATION = True
 ENABLE_ENCODER_BIAS                  = True
 
@@ -45,8 +45,12 @@ ENCODER_BIAS_RANGE                  = (-0.015, 0.015)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # ── Task constants ────────────────────────────────────────────────────────────
-# 1.0 second at 50 Hz = 50 control steps. Clean single jump maneuver window.
-EPISODE_LENGTH_S = 1.0
+# 2.5 seconds at 50 Hz = 125 control steps:
+#   - 0.0 - 0.4s: squat & bilateral push-off
+#   - 0.4 - 0.7s: parabolic flight
+#   - 0.7 - 1.0s: touchdown & knee crouch absorption
+#   - 1.0 - 2.5s: extension to standing height and steady standing hold (1.5s annuity!)
+EPISODE_LENGTH_S = 2.5
 
 # Trunk heights (m)
 STAND_Z = 0.115
@@ -135,7 +139,7 @@ def make_microduck_jump_env_cfg(
         cfg.rewards["action_rate_l2"].weight = -0.1
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Bilateral takeoff launch velocity: requires BOTH feet on the floor to push!
+    # 1. Bilateral takeoff launch velocity: rewards both vx > 0 and vz > 0 with both feet grounded
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
         weight=4.0,
@@ -143,7 +147,9 @@ def make_microduck_jump_env_cfg(
             "sensor_name": "feet_ground_contact",
             "require_both_feet_ground": True,
             "max_height": 0.135,
-            "upright_std": 0.3,
+            "upright_std": 0.35,
+            "target_vx": 0.4,
+            "target_vz": 0.6,
         },
     )
 
@@ -156,11 +162,11 @@ def make_microduck_jump_env_cfg(
     # 3. Airborne reward: both feet fully in the air while upright (active until touchdown)
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
-        weight=6.0,
+        weight=5.0,
         params={
             "sensor_name": "feet_ground_contact",
             "min_height": 0.125,
-            "upright_std": 0.25,
+            "upright_std": 0.35,
         },
     )
 
@@ -171,39 +177,46 @@ def make_microduck_jump_env_cfg(
         params={
             "target_height": JUMP_TARGET_APEX_Z,
             "height_std": 0.025,
-            "upright_std": 0.25,
+            "upright_std": 0.35,
         },
     )
 
-    # 5. Compliant landing recovery: absorbs impact with a knee crouch upon touchdown,
-    # then smoothly extends back into an erect standing posture with upright head.
+    # 5. Forward distance reward: rewards forward displacement (x - x_spawn) achieved through flight
+    cfg.rewards["jump_forward_dist"] = RewardTermCfg(
+        func=microduck_mdp.jump_forward_distance_reward,
+        weight=3.0,
+        params={"target_distance": 0.15},
+    )
+
+    # 6. Compliant landing & standing recovery: absorbs impact with a knee crouch upon touchdown,
+    # then smoothly extends back into an erect standing posture and holds still for the rest of the episode.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_compliant_landing,
-        weight=3.0,
+        weight=5.0,
         params={
-            "crouch_height": 0.102,
+            "crouch_height": 0.100,
             "stand_height": STAND_Z,
-            "crouch_steps": 8,
-            "settle_steps": 16,
+            "crouch_steps": 10,
+            "settle_steps": 25,
             "height_std": 0.02,
             "upright_std": 0.20,
             "pose_std": 0.35,
         },
     )
 
-    # 6. Lateral drift penalty: keep jump strictly vertical in-place (negative weight)
-    cfg.rewards["jump_drift_penalty"] = RewardTermCfg(
-        func=microduck_mdp.jump_lateral_drift_penalty,
+    # 7. Lateral velocity penalty: prevent sideways drift (vy^2) while permitting forward jump (vx > 0)
+    cfg.rewards["jump_lateral_vel"] = RewardTermCfg(
+        func=microduck_mdp.jump_lateral_velocity_penalty,
         weight=-0.5,
     )
 
-    # 7. Yaw rate penalty: suppress spinning in the air without forcing leg symmetry
+    # 8. Yaw rate penalty: suppress spinning in the air
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
         weight=-0.3,
     )
 
-    # 8. Head pitch constraint: allows free movement within +/-30 deg for balance,
+    # 9. Head pitch constraint: allows free movement within +/-30 deg for balance,
     # charging a quadratic barrier penalty only beyond 30 deg forward or backward.
     cfg.rewards["head_pitch_limit"] = RewardTermCfg(
         func=microduck_mdp.head_pitch_limit_penalty,
@@ -211,7 +224,7 @@ def make_microduck_jump_env_cfg(
         params={"max_angle_rad": math.radians(30.0)},
     )
 
-    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 10. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,

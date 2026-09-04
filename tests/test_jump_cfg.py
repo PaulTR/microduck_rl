@@ -37,14 +37,18 @@ def test_jump_rewards_present_and_signs():
     assert cfg.rewards["jump_height"].weight > 0.0
     assert cfg.rewards["jump_height"].params["target_height"] == JUMP_TARGET_APEX_Z
 
+    assert "jump_forward_dist" in cfg.rewards
+    assert cfg.rewards["jump_forward_dist"].weight > 0.0
+    assert cfg.rewards["jump_forward_dist"].params["target_distance"] == 0.15
+
     assert "jump_landing" in cfg.rewards
     assert cfg.rewards["jump_landing"].weight > 0.0
     assert cfg.rewards["jump_landing"].params["stand_height"] == STAND_Z
-    assert cfg.rewards["jump_landing"].params["crouch_height"] == 0.102
+    assert cfg.rewards["jump_landing"].params["crouch_height"] == 0.100
 
     # Negative penalty / cost terms
-    assert "jump_drift_penalty" in cfg.rewards
-    assert cfg.rewards["jump_drift_penalty"].weight < 0.0
+    assert "jump_lateral_vel" in cfg.rewards
+    assert cfg.rewards["jump_lateral_vel"].weight < 0.0
 
     assert "jump_yaw_rate" in cfg.rewards
     assert cfg.rewards["jump_yaw_rate"].weight < 0.0
@@ -58,6 +62,11 @@ def test_jump_rewards_present_and_signs():
 
     assert "action_rate_l2" in cfg.rewards
     assert cfg.rewards["action_rate_l2"].weight < 0.0
+
+
+def test_jump_symmetry_enabled():
+    """Verify that bilateral symmetry is enabled in the PPO runner config."""
+    assert MicroduckJumpRlCfg.algorithm.symmetry_cfg is not None
 
 
 def test_walking_rewards_dropped():
@@ -136,5 +145,22 @@ def test_twist_command_heading_none():
     cfg = make_microduck_jump_env_cfg()
     assert cfg.commands["twist"].heading_command is False
     assert cfg.commands["twist"].ranges.heading is None
+
+
+def test_lateral_velocity_penalty_ignores_forward_speed():
+    """Verify that jump_lateral_velocity_penalty only taxes vy and ignores vx."""
+    import torch
+    from unittest.mock import MagicMock
+    from mjlab_microduck.tasks.mdp import jump_lateral_velocity_penalty
+
+    mock_env = MagicMock()
+    mock_robot = MagicMock()
+    lin_vel_b = torch.tensor([[0.5, 0.0, 0.0], [0.5, 0.3, 0.0]])
+    mock_robot.data.root_link_lin_vel_b = lin_vel_b
+    mock_env.scene = {"robot": mock_robot}
+
+    penalty = jump_lateral_velocity_penalty(mock_env)
+    assert penalty[0].item() == 0.0
+    assert abs(penalty[1].item() - 0.09) < 1e-5
 
 

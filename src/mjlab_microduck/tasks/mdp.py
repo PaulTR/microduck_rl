@@ -7349,10 +7349,12 @@ def jump_launch_velocity(
     sensor_name: str = "feet_ground_contact",
     require_both_feet_ground: bool = True,
     max_height: float = 0.135,
-    upright_std: float = 0.3,
+    upright_std: float = 0.35,
+    target_vx: float = 0.4,
+    target_vz: float = 0.6,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward positive upward vertical velocity vz while near the ground during takeoff.
+    """Reward forward (vx > 0) and upward (vz > 0) velocity during bilateral takeoff push.
 
     Turns off permanently once airborne or landed to ensure only ONE jump launch.
     Requires BOTH feet on the ground so one-legged kicks receive 0.0 reward!
@@ -7365,8 +7367,12 @@ def jump_launch_velocity(
     z = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
     )
+    # Forward velocity in body frame, vertical in world frame
+    vx = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 0], nan=0.0)
     vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
-    upward_vz = torch.clamp(vz, min=0.0)
+    forward_vx = torch.clamp(vx, min=0.0, max=target_vx * 1.5)
+    upward_vz = torch.clamp(vz, min=0.0, max=target_vz * 1.5)
+    launch_vel = 0.5 * forward_vx + upward_vz
 
     # Bilateral ground contact: both feet must be in contact during takeoff push!
     if require_both_feet_ground and sensor_name in env.scene.sensors:
@@ -7376,10 +7382,12 @@ def jump_launch_velocity(
         both_feet_ground = 1.0
 
     quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright_g = torch.exp(-tilt_sq / (upright_std * upright_std))
+    roll_sq = quat[:, 1].pow(2)
+    pitch_sq = quat[:, 2].pow(2)
+    # Tighter on roll (no cartwheeling), generous on pitch to allow natural forward lean during takeoff
+    upright_g = torch.exp(-roll_sq / (0.15 * 0.15) - pitch_sq / (upright_std * upright_std))
 
-    return upward_vz * (z < max_height).float() * upright_g * both_feet_ground * active.float()
+    return launch_vel * (z < max_height).float() * upright_g * both_feet_ground * active.float()
 
 
 def leg_similarity_reward(
@@ -7411,20 +7419,39 @@ def leg_similarity_reward(
     return torch.exp(-diff / 0.3)
 
 
+def jump_forward_distance_reward(
+    env: ManagerBasedRlEnv,
+    target_distance: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward forward displacement (x - x_spawn) achieved through flight.
+
+    Gated on having achieved legitimate flight so ground shuffling receives 0.
+    """
+    _update_jump_state(env, asset_cfg=asset_cfg)
+    latch, count, touchdown, td_step = _jump_state(env)
+    asset: Entity = env.scene[asset_cfg.name]
+    dx = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 0] - env.scene.terrain.env_origins[:, 0], nan=0.0
+    )
+    score = torch.clamp(dx / target_distance, min=0.0, max=1.0)
+    return score * latch.float()
+
+
 def jump_compliant_landing(
     env: ManagerBasedRlEnv,
-    crouch_height: float = 0.102,
+    crouch_height: float = 0.100,
     stand_height: float = 0.115,
-    crouch_steps: int = 8,
-    settle_steps: int = 16,
+    crouch_steps: int = 10,
+    settle_steps: int = 25,
     height_std: float = 0.02,
     upright_std: float = 0.20,
     pose_std: float = 0.35,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Compliant landing: absorbs impact with a knee crouch upon touchdown,
+    """Compliant landing and standing recovery: absorbs impact with a knee crouch upon touchdown,
+    then smoothly extends back into an erect standing posture and holds still for the rest of the episode.
 
-    then smoothly extends back into an upright standing posture with erect head.
     Gated strictly on having achieved flight and touched down.
     """
     _update_jump_state(env, asset_cfg=asset_cfg)
@@ -7443,7 +7470,7 @@ def jump_compliant_landing(
         max=1.0,
     )
 
-    # Dynamic target height: crouch_height (0.102m) -> stand_height (0.115m)
+    # Dynamic target height: crouch_height (0.100m) -> stand_height (0.115m)
     target_z = crouch_height + rise_progress * (stand_height - crouch_height)
     z = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
@@ -7474,21 +7501,31 @@ def jump_compliant_landing(
     knee_mask[:, env._knee_joint_ids] = rise_progress.unsqueeze(-1)
     pose_score = torch.exp(-((pose_err * knee_mask) / pose_std) ** 2).mean(dim=-1)
 
-    composite = height_score * upright_score * pose_score
+    # Velocity damping after touchdown: robot should brake forward motion and stand still
+    v_b = asset.data.root_link_lin_vel_b
+    w_b = asset.data.root_link_ang_vel_b
+    vel_sq = v_b.pow(2).sum(dim=-1) + 0.1 * w_b.pow(2).sum(dim=-1)
+    vel_score = torch.exp(-vel_sq / 0.15)
+
+    composite = height_score * upright_score * pose_score * (0.5 + 0.5 * vel_score)
     return composite * touchdown.float()
 
 
-def jump_lateral_drift_penalty(
+def jump_lateral_velocity_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Penalize horizontal base velocity (vx^2 + vy^2) to keep the jump strictly vertical.
+    """Penalize lateral base velocity (vy^2) to prevent sideways drift while allowing forward flight.
 
     Returns >= 0 (use a negative weight in the config).
     """
     asset: Entity = env.scene[asset_cfg.name]
     lin_vel_b = asset.data.root_link_lin_vel_b
-    return torch.nan_to_num(lin_vel_b[:, 0].pow(2) + lin_vel_b[:, 1].pow(2), nan=0.0)
+    return torch.nan_to_num(lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# Backward-compatible alias
+jump_lateral_drift_penalty = jump_lateral_velocity_penalty
 
 
 def jump_foot_impact_penalty(
@@ -7584,7 +7621,9 @@ def jump_double_bounce(
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     found = env.scene.sensors[sensor_name].data.found
     both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
-    return touchdown & both_feet_airborne
+    step = int(env.common_step_counter)
+    can_check = (step - td_step) > 2
+    return touchdown & both_feet_airborne & can_check
 
 
 
