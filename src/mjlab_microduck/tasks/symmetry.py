@@ -46,11 +46,14 @@ from tensordict import TensorDict
 from mjlab.rl import RslRlPpoAlgorithmCfg
 
 
+from typing import Any
+
+
 @dataclass
 class PpoWithSymmetryCfg(RslRlPpoAlgorithmCfg):
     """PPO algorithm config extended with an optional symmetry_cfg field."""
 
-    symmetry_cfg: dict | None = None
+    symmetry_cfg: Any = None
 
 
 SYMMETRY_CFG = {

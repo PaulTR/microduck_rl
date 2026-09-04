@@ -27,9 +27,6 @@ def test_jump_rewards_present_and_signs():
     assert cfg.rewards["jump_launch"].weight > 0.0
     assert cfg.rewards["jump_launch"].params["require_both_feet_ground"] is True
 
-    assert "leg_similarity" in cfg.rewards
-    assert cfg.rewards["leg_similarity"].weight > 0.0
-
     assert "jump_air_time" in cfg.rewards
     assert cfg.rewards["jump_air_time"].weight > 0.0
 
@@ -122,9 +119,10 @@ def test_terminations():
 
     assert "double_bounce" in cfg.terminations
     assert "head_pitch_exceeded" in cfg.terminations
-    assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(40.0)
+    assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(45.0)
     assert "push_robot" not in cfg.events
     assert "upright" not in cfg.rewards
+    assert "jump_spawn_mix" in cfg.events
 
 
 def test_jump_task_registered():
@@ -196,6 +194,7 @@ def test_jump_state_single_jump_lifecycle():
     env.scene = DummyObj()
     robot = DummyObj()
     robot.data = DummyObj()
+    robot.data.joint_pos = torch.zeros(1, 14)
     env.scene.robot = robot
     env.scene.terrain = DummyObj()
     env.scene.terrain.env_origins = torch.zeros(1, 3)

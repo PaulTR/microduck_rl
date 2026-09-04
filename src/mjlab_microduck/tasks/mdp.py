@@ -138,7 +138,10 @@ def _servo_joint_ids(env: "ManagerBasedRlEnv", asset: Entity) -> list:
     key = id(asset)
     ids = cache.get(key)
     if ids is None:
-        ids, _ = asset.find_joints(r"^(?!passive_).*")
+        if hasattr(asset, "find_joints"):
+            ids, _ = asset.find_joints(r"^(?!passive_).*")
+        else:
+            ids = list(range(asset.data.joint_pos.shape[-1]))
         cache[key] = ids
     return ids
 
@@ -7300,6 +7303,53 @@ def reset_jump_state(
     env._jump_last_update_step = -1
 
 
+def set_jump_spawn_pose(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    crouch_prob: float = 0.35,
+) -> None:
+    """Reset event that spawns a fraction of envs in a ready-to-launch squat pose.
+
+    Built-in reverse curriculum: provides dense on-policy data on the explosive
+    takeoff -> flight -> landing -> standing sequence from iteration 0, preventing
+    the policy from getting trapped in the frozen-standing local minimum.
+    """
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if crouch_prob <= 0.0:
+        return
+    u = torch.rand(len(env_ids), device=env.device)
+    crouch_mask = u < crouch_prob
+    crouch_ids = env_ids[crouch_mask]
+    if len(crouch_ids) == 0:
+        return
+
+    asset: Entity = env.scene[asset_cfg.name]
+    if not hasattr(env, "_jump_crouch_jnt_ids"):
+        l_hp, _ = asset.find_joints([r"^(?!passive_).*left_hip_pitch.*"])
+        l_kn, _ = asset.find_joints([r"^(?!passive_).*left_knee.*"])
+        l_ak, _ = asset.find_joints([r"^(?!passive_).*left_ankle.*"])
+        r_hp, _ = asset.find_joints([r"^(?!passive_).*right_hip_pitch.*"])
+        r_kn, _ = asset.find_joints([r"^(?!passive_).*right_knee.*"])
+        r_ak, _ = asset.find_joints([r"^(?!passive_).*right_ankle.*"])
+        env._jump_crouch_jnt_ids = (l_hp[0], l_kn[0], l_ak[0], r_hp[0], r_kn[0], r_ak[0])
+
+    l_hp, l_kn, l_ak, r_hp, r_kn, r_ak = env._jump_crouch_jnt_ids
+
+    # Symmetrical squat overrides (hips flexed, knees flexed, ankles dorsiflexed)
+    env.sim.data.qpos[crouch_ids, 7 + l_hp] = -0.4579 - 0.35
+    env.sim.data.qpos[crouch_ids, 7 + l_kn] = -0.0049 + 0.70
+    env.sim.data.qpos[crouch_ids, 7 + l_ak] = 0.4530 - 0.35
+    env.sim.data.qpos[crouch_ids, 7 + r_hp] = 0.4579 + 0.35
+    env.sim.data.qpos[crouch_ids, 7 + r_kn] = 0.0049 - 0.70
+    env.sim.data.qpos[crouch_ids, 7 + r_ak] = -0.4530 + 0.35
+    # Lower trunk z to 0.090m so feet remain flat on the floor in squat
+    env.sim.data.qpos[crouch_ids, 2] = 0.090
+    env.sim.data.qvel[crouch_ids, :] = 0.0
+
+
 def jump_air_time_reward(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
@@ -7377,7 +7427,7 @@ def jump_launch_velocity(
     target_vz: float = 0.6,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward forward (vx > 0) and upward (vz > 0) velocity during bilateral takeoff push.
+    """Reward countermovement crouch compression and explosive bilateral takeoff push.
 
     Turns off permanently once takeoff has occurred to ensure strictly ONE push window.
     Requires BOTH feet on the ground so one-legged kicks receive 0.0 reward!
@@ -7395,7 +7445,15 @@ def jump_launch_velocity(
     vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
     forward_vx = torch.clamp(vx, min=0.0, max=target_vx * 1.5)
     upward_vz = torch.clamp(vz, min=0.0, max=target_vz * 1.5)
-    launch_vel = 0.5 * forward_vx + upward_vz
+
+    # Knee flexion countermovement (squatting down to store stroke length before push)
+    # Knees bend positive on left, negative on right in HOME frame
+    q = _servo_joint_pos(env, asset)
+    knee_flex = 0.5 * (torch.clamp(q[:, 3], min=0.0, max=0.7) + torch.clamp(-q[:, 12], min=0.0, max=0.7))
+    squat_progress = knee_flex / 0.7  # 0.0 at standing -> 1.0 at deep squat
+
+    # Launch velocity combines explosive extension velocity + crouch potential
+    launch_vel = 0.5 * forward_vx + upward_vz + 0.3 * squat_progress
 
     # Bilateral ground contact: both feet must be in contact during takeoff push!
     if require_both_feet_ground and sensor_name in env.scene.sensors:
@@ -7505,13 +7563,9 @@ def jump_compliant_landing(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_score = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    # Pose target: standing HOME with upright head (neck/head pitch = 0.0)
+    # Pose target: standing HOME with nominal upright head
     cur_pos = _servo_joint_pos(env, asset)
     target_pos = _servo_default_joint_pos(env, asset).clone()
-    target_pos[:, 5] = 0.0  # neck_pitch
-    target_pos[:, 6] = 0.0  # head_pitch
-    target_pos[:, 7] = 0.0  # head_yaw
-    target_pos[:, 8] = 0.0  # head_roll
 
     pose_err = (cur_pos - target_pos).abs()
 
@@ -7588,47 +7642,41 @@ def head_pitch_limit_penalty(
     max_angle_rad: float = math.radians(30.0),
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Penalize head pitch exceeding max_angle_rad (30 deg) forward or backward.
+    """Penalize head pitch deviation exceeding max_angle_rad (30 deg) from nominal upright.
 
-    Restricts front/back movement of neck_pitch and head_pitch to within +/-30 deg.
+    Restricts front/back movement of neck_pitch and head_pitch to within +/-30 deg of nominal.
     Within +/-30 deg: returns 0.0 (natural movement allowed for balance).
     Returns >= 0 (use negative weight in cfg).
     """
     asset: Entity = env.scene[asset_cfg.name]
-    if not hasattr(env, "_head_pitch_jnt_ids"):
-        n_id, _ = asset.find_joints(r"^(?!passive_).*neck_pitch.*")
-        h_id, _ = asset.find_joints(r"^(?!passive_).*head_pitch.*")
-        env._head_pitch_jnt_ids = (n_id[0], h_id[0])
-    nid, hid = env._head_pitch_jnt_ids
-    q = asset.data.joint_pos
-    q_neck = q[:, nid]
-    q_head = q[:, hid]
-    total_pitch = q_neck + q_head
+    q = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    # Canonical servo indices: neck_pitch = 5, head_pitch = 6
+    # Deviation from nominal head angles (nominal HOME is neck=20 deg, head=20 deg)
+    d_neck = q[:, 5] - default_pos[:, 5]
+    d_head = q[:, 6] - default_pos[:, 6]
+    total_pitch_dev = d_neck + d_head
 
-    excess_total = torch.clamp(torch.abs(total_pitch) - max_angle_rad, min=0.0)
-    excess_neck = torch.clamp(torch.abs(q_neck) - max_angle_rad, min=0.0)
-    excess_head = torch.clamp(torch.abs(q_head) - max_angle_rad, min=0.0)
+    excess_total = torch.clamp(torch.abs(total_pitch_dev) - max_angle_rad, min=0.0)
+    excess_neck = torch.clamp(torch.abs(d_neck) - max_angle_rad, min=0.0)
+    excess_head = torch.clamp(torch.abs(d_head) - max_angle_rad, min=0.0)
 
     return excess_total.pow(2) + excess_neck.pow(2) + excess_head.pow(2)
 
 
 def head_pitch_exceeded(
     env: ManagerBasedRlEnv,
-    max_angle_rad: float = math.radians(40.0),
+    max_angle_rad: float = math.radians(45.0),
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Terminate episode if head pitches beyond max_angle_rad (40 deg) forward or backward."""
+    """Terminate episode if head pitches beyond max_angle_rad (45 deg) deviation from nominal."""
     asset: Entity = env.scene[asset_cfg.name]
-    if not hasattr(env, "_head_pitch_jnt_ids"):
-        n_id, _ = asset.find_joints(r"^(?!passive_).*neck_pitch.*")
-        h_id, _ = asset.find_joints(r"^(?!passive_).*head_pitch.*")
-        env._head_pitch_jnt_ids = (n_id[0], h_id[0])
-    nid, hid = env._head_pitch_jnt_ids
-    q = asset.data.joint_pos
-    q_neck = q[:, nid]
-    q_head = q[:, hid]
-    total_pitch = q_neck + q_head
-    bad = (torch.abs(total_pitch) > max_angle_rad) | (torch.abs(q_neck) > max_angle_rad) | (torch.abs(q_head) > max_angle_rad)
+    q = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    d_neck = q[:, 5] - default_pos[:, 5]
+    d_head = q[:, 6] - default_pos[:, 6]
+    total_pitch_dev = d_neck + d_head
+    bad = (torch.abs(total_pitch_dev) > max_angle_rad) | (torch.abs(d_neck) > max_angle_rad) | (torch.abs(d_head) > max_angle_rad)
     return bad
 
 

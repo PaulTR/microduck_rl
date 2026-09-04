@@ -127,16 +127,16 @@ def make_microduck_jump_env_cfg(
             del cfg.curriculum[c_name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
-    # Damping roll/pitch angular wobble
+    # Damping roll/pitch angular wobble (low during discovery so forward broad jump launch is not taxed)
     if "body_ang_vel" in cfg.rewards:
-        cfg.rewards["body_ang_vel"].weight = -0.05
+        cfg.rewards["body_ang_vel"].weight = -0.005
 
-    # Action smoothness: gentle -0.05 damps servo jitter without taxing explosive impulse
+    # Action smoothness: gentle -0.005 damps servo chatter without blocking explosive launch impulse
     if "action_rate_l2" in cfg.rewards:
-        cfg.rewards["action_rate_l2"].weight = -0.05
+        cfg.rewards["action_rate_l2"].weight = -0.005
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Bilateral takeoff launch velocity: rewards both vx > 0 and vz > 0 with both feet grounded
+    # 1. Bilateral takeoff launch: rewards countermovement crouch + explosive upward & forward push
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
         weight=4.0,
@@ -150,13 +150,7 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 2. Bilateral leg similarity: guides left and right legs to push symmetrically
-    cfg.rewards["leg_similarity"] = RewardTermCfg(
-        func=microduck_mdp.leg_similarity_reward,
-        weight=1.5,
-    )
-
-    # 3. Airborne reward: both feet fully in the air while upright (active until touchdown)
+    # 2. Airborne reward: both feet fully in the air while upright (active until touchdown)
     cfg.rewards["jump_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_air_time_reward,
         weight=5.0,
@@ -167,7 +161,7 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 4. Apex height target: Gaussian reward for reaching apex z ≈ 0.148 m
+    # 3. Apex height target: Gaussian reward for reaching apex z ≈ 0.148 m
     cfg.rewards["jump_height"] = RewardTermCfg(
         func=microduck_mdp.jump_height_target,
         weight=4.0,
@@ -178,14 +172,14 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 5. Forward distance reward: rewards forward displacement (x - x_spawn) achieved through flight
+    # 4. Forward distance reward: rewards forward displacement (x - x_spawn) achieved through flight
     cfg.rewards["jump_forward_dist"] = RewardTermCfg(
         func=microduck_mdp.jump_forward_distance_reward,
         weight=3.0,
         params={"target_distance": 0.15},
     )
 
-    # 6. Compliant landing & standing recovery: absorbs impact with a knee crouch upon touchdown,
+    # 5. Compliant landing & standing recovery: absorbs impact with a knee crouch upon touchdown,
     # then smoothly extends back into an erect standing posture and holds still for the rest of the episode.
     cfg.rewards["jump_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_compliant_landing,
@@ -201,27 +195,27 @@ def make_microduck_jump_env_cfg(
         },
     )
 
-    # 7. Lateral velocity penalty: prevent sideways drift (vy^2) while permitting forward jump (vx > 0)
+    # 6. Lateral velocity penalty: prevent sideways drift (vy^2) while permitting forward jump (vx > 0)
     cfg.rewards["jump_lateral_vel"] = RewardTermCfg(
         func=microduck_mdp.jump_lateral_velocity_penalty,
         weight=-0.5,
     )
 
-    # 8. Yaw rate penalty: suppress spinning in the air
+    # 7. Yaw rate penalty: suppress spinning in the air
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
         weight=-0.3,
     )
 
-    # 9. Head pitch constraint: allows free movement within +/-30 deg for balance,
-    # charging a quadratic barrier penalty only beyond 30 deg forward or backward.
+    # 8. Head pitch constraint: allows free movement within +/-30 deg of nominal upright,
+    # charging a quadratic barrier penalty only beyond 30 deg forward or backward deviation.
     cfg.rewards["head_pitch_limit"] = RewardTermCfg(
         func=microduck_mdp.head_pitch_limit_penalty,
-        weight=-2.0,
+        weight=-0.5,
         params={"max_angle_rad": math.radians(30.0)},
     )
 
-    # 10. Touchdown impact penalty: protect XL330 gears from extreme landing force
+    # 9. Touchdown impact penalty: protect XL330 gears from extreme landing force
     cfg.rewards["jump_foot_impact"] = RewardTermCfg(
         func=microduck_mdp.jump_foot_impact_penalty,
         weight=-0.1,
@@ -248,6 +242,14 @@ def make_microduck_jump_env_cfg(
     }
     cfg.events["reset_base"].params["velocity_range"] = {}
 
+    # Jump spawn mix (reverse curriculum): spawns 35% of envs in a ready-to-launch squat pose,
+    # and 65% in nominal standing. In play mode, 100% spawn in standing.
+    cfg.events["jump_spawn_mix"] = EventTermCfg(
+        func=microduck_mdp.set_jump_spawn_pose,
+        mode="reset",
+        params={"crouch_prob": 0.0 if play else 0.35},
+    )
+
     # Disable random pushes during jumping (incoherent for jump/landing discovery)
     if not ENABLE_VELOCITY_PUSHES and "push_robot" in cfg.events:
         del cfg.events["push_robot"]
@@ -265,10 +267,10 @@ def make_microduck_jump_env_cfg(
         params={"sensor_name": "feet_ground_contact"},
     )
 
-    # Terminate immediately if head pitches beyond 40 degrees forward or backward
+    # Terminate if head pitches beyond 45 degrees deviation from nominal upright
     cfg.terminations["head_pitch_exceeded"] = TerminationTermCfg(
         func=microduck_mdp.head_pitch_exceeded,
-        params={"max_angle_rad": math.radians(40.0)},
+        params={"max_angle_rad": math.radians(45.0)},
     )
 
     # ── Commands: near-zero ranges keep 61D obs neurons alive without commanding walking ──
