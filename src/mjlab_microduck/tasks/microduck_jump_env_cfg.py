@@ -45,12 +45,13 @@ ENCODER_BIAS_RANGE                  = (-0.015, 0.015)
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # ── Task constants ────────────────────────────────────────────────────────────
-# 2.5 seconds at 50 Hz = 125 control steps:
+# 3.0 seconds at 50 Hz = 150 control steps:
 #   - 0.0 - 0.4s: squat & bilateral push-off
 #   - 0.4 - 0.7s: parabolic flight
 #   - 0.7 - 1.0s: touchdown & knee crouch absorption
-#   - 1.0 - 2.5s: extension to standing height and steady standing hold (1.5s annuity!)
-EPISODE_LENGTH_S = 2.5
+#   - 1.0 - 1.6s: extension from crouch to standing height (0.115m)
+#   - 1.6 - 3.0s: rock-solid standing hold (1.4s of dense standing annuity!)
+EPISODE_LENGTH_S = 3.0
 
 # Trunk heights (m)
 STAND_Z = 0.115
@@ -197,7 +198,7 @@ def make_microduck_jump_env_cfg(
             "crouch_height": 0.100,
             "stand_height": STAND_Z,
             "crouch_steps": 10,
-            "settle_steps": 25,
+            "settle_steps": 30,
             "height_std": 0.02,
             "upright_std": 0.20,
             "pose_std": 0.35,
