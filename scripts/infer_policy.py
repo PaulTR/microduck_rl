@@ -117,6 +117,9 @@ class TerminalInput:
                     if name:
                         self._queue.put(name)
                 continue  # bare ESC / unknown sequence: ignore
+            if ch in ("\x7f", "\x08"):
+                self._queue.put("backspace")
+                continue
             self._queue.put(ch.lower() if ch.isalpha() else ch)
 
     def get_keys(self):
@@ -816,6 +819,41 @@ class PolicyInference:
         if not self.new_cmd_obs:
             self.data.ctrl[5:9] += self.head_offset
 
+    def reset(self):
+        """Reset policy internal states (commands, last action, delays, modes)."""
+        self.last_action[:] = 0.0
+        self.vel_cmd[:] = 0.0
+        self.body_cmd[:] = 0.0
+        self.head_offset[:] = 0.0
+        self.command[:] = 0.0
+        self.body_pose_mode = False
+        self.head_mode = False
+        self.ground_pick_mode = False
+        self.ground_pick_phase = 0.0
+        self.sit_mode = False
+        self.slope_mode = False
+        self.behavior_mode = None
+        self.behavior_time_left = 0.0
+        if self.use_delay and self.action_buffer is not None:
+            for buf in self.action_buffer:
+                buf[:] = 0.0
+            self.buffer_index = 0
+        if self.walking_session:
+            self.current_policy = "walking"
+            self.ort_session = self.walking_session
+        elif self.standing_session:
+            self.current_policy = "standing"
+            self.ort_session = self.standing_session
+        elif self.is_sitstand:
+            self.current_policy = "sit"
+            self.ort_session = self.sit_session
+        elif "jump" in self.behavior_sessions:
+            self.current_policy = "jump"
+            self.ort_session = self.behavior_sessions["jump"]
+        self.input_name = self.ort_session.get_inputs()[0].name
+        self.output_name = self.ort_session.get_outputs()[0].name
+        self._update_command()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
@@ -1083,6 +1121,30 @@ def main():
         data.qvel[_trunk_qvel_adr + 1] = vy
         print(f"PUSH applied: v=[{vx:.2f}, {vy:.2f}, 0] m/s (angle={np.degrees(angle):.0f}°)")
 
+    def reset_sim():
+        nonlocal control_step_count, jump_once_pending, start_time, policy_enabled
+        data.qpos[qpos_adr + 0] = 0.0
+        data.qpos[qpos_adr + 1] = 0.0
+        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+        for i, qpos_idx in enumerate(policy.joint_qpos_indices):
+            data.qpos[qpos_idx] = policy.default_pose[i]
+        data.qvel[:] = 0.0
+        data.ctrl[:] = policy.default_pose
+        data.qacc[:] = 0.0
+        if policy.ball_qpos_adr is not None and policy.ball_qvel_adr is not None:
+            data.qpos[policy.ball_qpos_adr:policy.ball_qpos_adr + 7] = [0.2, 0.0, BALL_RADIUS, 1, 0, 0, 0]
+            data.qvel[policy.ball_qvel_adr:policy.ball_qvel_adr + 6] = 0.0
+        mujoco.mj_forward(model, data)
+        policy.reset()
+        control_step_count = 0
+        vel_history.clear()
+        start_time = time.time()
+        policy_enabled = True
+        if args.jump_once:
+            jump_once_pending = True
+        print("\n[RESET] Simulation and robot reset to initial standing posture.")
+
     # Keys come from the TERMINAL (raw stdin, see TerminalInput) — not from the
     # MuJoCo viewer window, whose keypresses also fire built-in visualization
     # shortcuts. `key` is a symbolic name: "up"/"down"/"left"/"right", " ", or
@@ -1092,7 +1154,9 @@ def main():
     def handle_key(key):
         nonlocal policy_enabled, quit_requested
         try:
-            if key == "up":
+            if key in ("x", "backspace"):
+                reset_sim()
+            elif key == "up":
                 if policy.head_mode:
                     policy.head_offset[1] = np.clip(policy.head_offset[1] + policy.head_step, -policy.head_max, policy.head_max)
                     policy._update_command()
@@ -1239,6 +1303,7 @@ def main():
     print("  R:                roulade / forward roll (requires --roulade)")
     print("  J:                jump (requires --jump)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
+    print("  X / Backspace:    reset simulation & robot to initial standing spawn")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
     print(f"  UP/DOWN arrow:    Δz ±10mm  (max ±{BODY_CMD_MAX_Z*1000:.0f}mm)")
