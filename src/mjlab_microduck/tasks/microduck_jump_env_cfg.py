@@ -109,6 +109,7 @@ def make_microduck_jump_env_cfg(
         "head_pose_tracking",
         "head_pose_bias",
         "body_pose_tracking",
+        "upright",  # Always-on upright opposes forward takeoff lean; orientation is gated by jump terms
     ]:
         if name in cfg.rewards:
             del cfg.rewards[name]
@@ -126,18 +127,13 @@ def make_microduck_jump_env_cfg(
             del cfg.curriculum[c_name]
 
     # ── Tune general posture & smoothness stabilizers ─────────────────────────
-    # Upright reward to keep torso vertical (weight 1.0 allows slight lean for launch)
-    if "upright" in cfg.rewards:
-        cfg.rewards["upright"].weight = 1.0
-        cfg.rewards["upright"].params["std"] = math.sqrt(0.05)
-
     # Damping roll/pitch angular wobble
     if "body_ang_vel" in cfg.rewards:
         cfg.rewards["body_ang_vel"].weight = -0.05
 
-    # Action smoothness: locked to gentle -0.1 to damp servo jitter without taxing explosive impulse
+    # Action smoothness: gentle -0.05 damps servo jitter without taxing explosive impulse
     if "action_rate_l2" in cfg.rewards:
-        cfg.rewards["action_rate_l2"].weight = -0.1
+        cfg.rewards["action_rate_l2"].weight = -0.05
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
     # 1. Bilateral takeoff launch velocity: rewards both vx > 0 and vz > 0 with both feet grounded
@@ -242,11 +238,15 @@ def make_microduck_jump_env_cfg(
         mode="reset",
     )
 
+    # Disable random pushes during jumping (incoherent for jump/landing discovery)
+    if not ENABLE_VELOCITY_PUSHES and "push_robot" in cfg.events:
+        del cfg.events["push_robot"]
+
     # ── Terminations ──────────────────────────────────────────────────────────
-    # Early reset if robot tips over beyond 35 degrees tilt
+    # Early reset if robot falls over beyond 55 degrees tilt (allows forward crouch & landing absorption)
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation,
-        params={"limit_angle": math.radians(35.0), "asset_cfg": SceneEntityCfg("robot")},
+        params={"limit_angle": math.radians(55.0), "asset_cfg": SceneEntityCfg("robot")},
     )
 
     # Terminate immediately if robot bounces airborne a second time after touchdown (kills skipping)
@@ -261,12 +261,11 @@ def make_microduck_jump_env_cfg(
         params={"max_angle_rad": math.radians(40.0)},
     )
 
-    # ── Commands: clamp velocity & heading commands to zero for stationary jumping ──
-    # Keeps the 13D command block active in observation space without requesting walking
+    # ── Commands: near-zero ranges keep 61D obs neurons alive without commanding walking ──
     if "twist" in cfg.commands:
-        cfg.commands["twist"].ranges.lin_vel_x = (0.0, 0.0)
-        cfg.commands["twist"].ranges.lin_vel_y = (0.0, 0.0)
-        cfg.commands["twist"].ranges.ang_vel_z = (0.0, 0.0)
+        cfg.commands["twist"].ranges.lin_vel_x = (-0.01, 0.01)
+        cfg.commands["twist"].ranges.lin_vel_y = (-0.01, 0.01)
+        cfg.commands["twist"].ranges.ang_vel_z = (-0.01, 0.01)
         cfg.commands["twist"].heading_command = False
         cfg.commands["twist"].ranges.heading = None
         cfg.commands["twist"].rel_standing_envs = 0.0

@@ -118,11 +118,13 @@ def test_terminations():
     """Verify early termination on extreme tilt, double bounce, and head pitch excursion."""
     cfg = make_microduck_jump_env_cfg()
     assert "fell_over" in cfg.terminations
-    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(35.0)
+    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(55.0)
 
     assert "double_bounce" in cfg.terminations
     assert "head_pitch_exceeded" in cfg.terminations
     assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(40.0)
+    assert "push_robot" not in cfg.events
+    assert "upright" not in cfg.rewards
 
 
 def test_jump_task_registered():
