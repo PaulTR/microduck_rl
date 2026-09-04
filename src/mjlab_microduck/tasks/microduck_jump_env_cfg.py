@@ -238,6 +238,16 @@ def make_microduck_jump_env_cfg(
         mode="reset",
     )
 
+    # Spawn consistently at origin facing forward along +x, feet firmly on the ground:
+    # (Velocity recipe drops robot from z=(0.12, 0.13) with random yaw, which disrupts jump initiation)
+    cfg.events["reset_base"].params["pose_range"] = {
+        "x": (0.0, 0.0),
+        "y": (0.0, 0.0),
+        "z": (0.114, 0.115),
+        "yaw": (0.0, 0.0),
+    }
+    cfg.events["reset_base"].params["velocity_range"] = {}
+
     # Disable random pushes during jumping (incoherent for jump/landing discovery)
     if not ENABLE_VELOCITY_PUSHES and "push_robot" in cfg.events:
         del cfg.events["push_robot"]

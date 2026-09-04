@@ -7207,14 +7207,23 @@ def roulade_lateral_velocity_penalty(
 #     still at spawn earns $0.00 landing reward. Only jumping unlocks the landing annuity.
 
 
-def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if not hasattr(env, "_jump_airborne_latch"):
         env._jump_airborne_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._jump_airborne_count = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
         env._jump_touchdown_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._jump_touchdown_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env._jump_takeoff_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        env._jump_ground_settled = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         env._jump_last_update_step = -1
-    return env._jump_airborne_latch, env._jump_airborne_count, env._jump_touchdown_latch, env._jump_touchdown_step
+    return (
+        env._jump_airborne_latch,
+        env._jump_airborne_count,
+        env._jump_touchdown_latch,
+        env._jump_touchdown_step,
+        env._jump_takeoff_latch,
+        env._jump_ground_settled,
+    )
 
 
 def _update_jump_state(
@@ -7225,16 +7234,22 @@ def _update_jump_state(
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
     """Check if the robot has achieved flight and track single-jump lifecycle."""
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     step = int(env.common_step_counter)
     if step != env._jump_last_update_step:
         asset: Entity = env.scene[asset_cfg.name]
         if sensor_name in env.scene.sensors:
             found = env.scene.sensors[sensor_name].data.found
+            # both_feet_airborne: full flight (no feet touching floor)
             both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
+            # any_foot_airborne: at least one foot lifted off the floor
+            any_foot_airborne = (found.view(found.shape[0], -1) == 0).any(dim=-1)
+            both_feet_ground = (found.view(found.shape[0], -1) > 0).all(dim=-1)
             feet_on_ground = ~both_feet_airborne
         else:
             both_feet_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            any_foot_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            both_feet_ground = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
             feet_on_ground = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
         z = torch.nan_to_num(
@@ -7244,7 +7259,13 @@ def _update_jump_state(
 
         quat = asset.data.root_link_quat_w
         tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-        upright_ok = tilt_sq < 0.25
+        upright_ok = tilt_sq < 0.35
+
+        # 1. First confirm robot is settled on the ground before arming takeoff
+        ground_settled[:] = ground_settled | both_feet_ground
+
+        # 2. Takeoff latch flips True the very first time ANY foot leaves ground AFTER being grounded
+        takeoff[:] = takeoff | (ground_settled & any_foot_airborne)
 
         is_airborne_now = both_feet_airborne & height_ok & upright_ok
         # Accumulate airborne steps before touchdown
@@ -7254,10 +7275,10 @@ def _update_jump_state(
         legit_flight = count >= min_airborne_steps
         latch[:] = latch | legit_flight
 
-        # Touchdown occurs when feet make contact AFTER achieving flight
-        newly_landed = latch & feet_on_ground & (~touchdown)
+        # Touchdown occurs when feet make contact AFTER takeoff has occurred
+        newly_landed = takeoff & feet_on_ground & (~touchdown)
         td_step[newly_landed] = step
-        touchdown[:] = touchdown | (latch & feet_on_ground)
+        touchdown[:] = touchdown | (takeoff & feet_on_ground)
 
         env._jump_last_update_step = step
 
@@ -7269,11 +7290,13 @@ def reset_jump_state(
     """Reset the jump state on episode reset."""
     if env_ids is None or len(env_ids) == 0:
         return
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     latch[env_ids] = False
     count[env_ids] = 0
     touchdown[env_ids] = False
     td_step[env_ids] = 0
+    takeoff[env_ids] = False
+    ground_settled[env_ids] = False
     env._jump_last_update_step = -1
 
 
@@ -7289,7 +7312,7 @@ def jump_air_time_reward(
     Turns off permanently once touchdown occurs (kills multiple bounces/skips).
     """
     _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     asset: Entity = env.scene[asset_cfg.name]
     if sensor_name not in env.scene.sensors:
         return torch.zeros(env.num_envs, device=env.device)
@@ -7323,7 +7346,7 @@ def jump_height_target(
     Active strictly before touchdown.
     """
     _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     asset: Entity = env.scene[asset_cfg.name]
     if sensor_name in env.scene.sensors:
         found = env.scene.sensors[sensor_name].data.found
@@ -7356,12 +7379,12 @@ def jump_launch_velocity(
 ) -> torch.Tensor:
     """Reward forward (vx > 0) and upward (vz > 0) velocity during bilateral takeoff push.
 
-    Turns off permanently once airborne or landed to ensure only ONE jump launch.
+    Turns off permanently once takeoff has occurred to ensure strictly ONE push window.
     Requires BOTH feet on the ground so one-legged kicks receive 0.0 reward!
     """
     _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
-    latch, count, touchdown, td_step = _jump_state(env)
-    active = (~latch) & (~touchdown)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
+    active = ground_settled & (~takeoff) & (~touchdown)
 
     asset: Entity = env.scene[asset_cfg.name]
     z = torch.nan_to_num(
@@ -7429,7 +7452,7 @@ def jump_forward_distance_reward(
     Gated on having achieved legitimate flight so ground shuffling receives 0.
     """
     _update_jump_state(env, asset_cfg=asset_cfg)
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     asset: Entity = env.scene[asset_cfg.name]
     dx = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 0] - env.scene.terrain.env_origins[:, 0], nan=0.0
@@ -7443,7 +7466,7 @@ def jump_compliant_landing(
     crouch_height: float = 0.100,
     stand_height: float = 0.115,
     crouch_steps: int = 10,
-    settle_steps: int = 25,
+    settle_steps: int = 30,
     height_std: float = 0.02,
     upright_std: float = 0.20,
     pose_std: float = 0.35,
@@ -7455,7 +7478,7 @@ def jump_compliant_landing(
     Gated strictly on having achieved flight and touched down.
     """
     _update_jump_state(env, asset_cfg=asset_cfg)
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     if not touchdown.any():
         return torch.zeros(env.num_envs, device=env.device)
 
@@ -7614,16 +7637,17 @@ def jump_double_bounce(
     sensor_name: str = "feet_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Terminate episode if robot goes airborne again after touchdown (kills multiple bounces)."""
+    """Terminate episode if ANY foot leaves the ground after touchdown (kills skipping, hopping, and bouncing)."""
     _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
-    latch, count, touchdown, td_step = _jump_state(env)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     if sensor_name not in env.scene.sensors:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     found = env.scene.sensors[sensor_name].data.found
-    both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
+    any_foot_airborne = (found.view(found.shape[0], -1) == 0).any(dim=-1)
     step = int(env.common_step_counter)
-    can_check = (step - td_step) > 2
-    return touchdown & both_feet_airborne & can_check
+    can_check = (step - td_step) > 4
+    return touchdown & any_foot_airborne & can_check
+
 
 
 

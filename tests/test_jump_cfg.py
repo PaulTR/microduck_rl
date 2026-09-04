@@ -166,3 +166,81 @@ def test_lateral_velocity_penalty_ignores_forward_speed():
     assert abs(penalty[1].item() - 0.09) < 1e-5
 
 
+def test_jump_spawn_ground_contact():
+    """Verify that spawn pose_range places robot with feet grounded and facing +x."""
+    cfg = make_microduck_jump_env_cfg()
+    pose_range = cfg.events["reset_base"].params["pose_range"]
+    assert pose_range["z"] == (0.114, 0.115)
+    assert pose_range["yaw"] == (0.0, 0.0)
+    assert pose_range["x"] == (0.0, 0.0)
+    assert pose_range["y"] == (0.0, 0.0)
+
+
+def test_jump_state_single_jump_lifecycle():
+    """Verify that jump state enforces strictly ONE takeoff and kills skipping/hopping."""
+    import torch
+    from mjlab_microduck.tasks.mdp import (
+        _update_jump_state,
+        _jump_state,
+        jump_double_bounce,
+        jump_launch_velocity,
+    )
+
+    class DummyObj:
+        def __getitem__(self, item):
+            return getattr(self, item, None)
+
+    env = DummyObj()
+    env.num_envs = 1
+    env.device = "cpu"
+    env.scene = DummyObj()
+    robot = DummyObj()
+    robot.data = DummyObj()
+    env.scene.robot = robot
+    env.scene.terrain = DummyObj()
+    env.scene.terrain.env_origins = torch.zeros(1, 3)
+    sensor = DummyObj()
+    sensor.data = DummyObj()
+    env.scene.sensors = {"feet_ground_contact": sensor}
+
+    def step(step_num, found_vals, z_val):
+        env.common_step_counter = step_num
+        sensor.data.found = torch.tensor([found_vals])
+        robot.data.root_link_pos_w = torch.tensor([[0.0, 0.0, z_val]])
+        robot.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        robot.data.root_link_lin_vel_b = torch.tensor([[0.4, 0.0, 0.0]])
+        robot.data.root_link_lin_vel_w = torch.tensor([[0.4, 0.0, 0.6]])
+        _update_jump_state(env)
+
+    # 1. Spawn on ground (Step 0)
+    step(0, [4.0, 4.0], 0.115)
+    latch, count, touchdown, td_step, takeoff, settled = _jump_state(env)
+    assert settled.item() is True
+    assert takeoff.item() is False
+    assert touchdown.item() is False
+    assert jump_launch_velocity(env).item() > 0.0
+    assert jump_double_bounce(env).item() is False
+
+    # 2. Flight (Step 4)
+    step(4, [0.0, 0.0], 0.145)
+    latch, count, touchdown, td_step, takeoff, settled = _jump_state(env)
+    assert takeoff.item() is True
+    assert jump_launch_velocity(env).item() == 0.0  # silenced permanently!
+
+    # 3. Touchdown (Step 9)
+    step(9, [4.0, 4.0], 0.100)
+    latch, count, touchdown, td_step, takeoff, settled = _jump_state(env)
+    assert touchdown.item() is True
+    assert td_step.item() == 9
+    assert jump_double_bounce(env).item() is False  # debounce period
+
+    # 4. Debounce elapsed (Step 14)
+    step(14, [4.0, 4.0], 0.115)
+    assert jump_double_bounce(env).item() is False
+
+    # 5. Skip/hop attempt (Step 15: one foot leaves ground)
+    step(15, [0.0, 4.0], 0.115)
+    assert jump_double_bounce(env).item() is True  # terminates immediately!
+
+
+
