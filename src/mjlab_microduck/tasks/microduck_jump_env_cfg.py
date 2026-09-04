@@ -320,5 +320,5 @@ MicroduckJumpRlCfg = RslRlOnPolicyRunnerCfg(
     run_name="jump",
     save_interval=250,
     num_steps_per_env=24,
-    max_iterations=2000,
+    max_iterations=5000,
 )
