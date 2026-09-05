@@ -27,6 +27,7 @@ def test_jump_rewards_present_and_signs():
     assert cfg.rewards["jump_launch"].weight > 0.0
     assert cfg.rewards["jump_launch"].params["require_both_feet_ground"] is True
     assert cfg.rewards["jump_launch"].params["target_vz"] == 0.5
+    assert cfg.rewards["jump_launch"].params["target_vx"] == 0.35
 
     assert "jump_flight_vx" in cfg.rewards
     assert cfg.rewards["jump_flight_vx"].weight > 0.0
@@ -42,6 +43,7 @@ def test_jump_rewards_present_and_signs():
     assert "jump_forward_dist" in cfg.rewards
     assert cfg.rewards["jump_forward_dist"].weight > 0.0
     assert cfg.rewards["jump_forward_dist"].params["target_distance"] == 0.15
+    assert cfg.rewards["jump_forward_dist"].params["sensor_name"] == "feet_ground_contact"
 
     assert "jump_landing" in cfg.rewards
     assert cfg.rewards["jump_landing"].weight > 0.0
@@ -116,16 +118,25 @@ def test_actor_observation_keeps_61d_contract():
 
 
 def test_terminations():
-    """Verify early termination on extreme tilt, double bounce, and head pitch excursion."""
+    """Verify early termination on extreme tilt, double bounce, crash, and head pitch excursion."""
     cfg = make_microduck_jump_env_cfg()
     assert "fell_over" in cfg.terminations
-    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(55.0)
+    assert cfg.terminations["fell_over"].params["limit_angle"] == math.radians(45.0)
+
+    assert "jump_trunk_crash" in cfg.terminations
+    assert cfg.terminations["jump_trunk_crash"].params["min_trunk_z"] == 0.075
 
     assert "double_bounce" in cfg.terminations
     assert "head_pitch_exceeded" in cfg.terminations
     assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(45.0)
     assert "push_robot" not in cfg.events
     assert "upright" not in cfg.rewards
+    assert "jump_spawn_mix" in cfg.events
+
+
+def test_play_mode_disables_crouch_spawn_mix():
+    """Verify that play mode does not introduce crouch spawn mix."""
+    cfg = make_microduck_jump_env_cfg(play=True)
     assert "jump_spawn_mix" not in cfg.events
 
 
@@ -244,6 +255,150 @@ def test_jump_state_single_jump_lifecycle():
     # 5. Skip/hop attempt (Step 15: one foot leaves ground)
     step(15, [0.0, 4.0], 0.115)
     assert jump_double_bounce(env).item() is True  # terminates immediately!
+
+
+def test_jump_forward_distance_kills_faceplants():
+    """Verify that forward distance reward gives 0.0 to fallen face-plants even with large dx."""
+    import torch
+    from mjlab_microduck.tasks.mdp import (
+        _update_jump_state,
+        jump_forward_distance_reward,
+    )
+
+    class DummyObj:
+        def __getitem__(self, item):
+            return getattr(self, item, None)
+
+    env = DummyObj()
+    env.num_envs = 2
+    env.device = "cpu"
+    env.scene = DummyObj()
+    robot = DummyObj()
+    robot.data = DummyObj()
+    robot.data.joint_pos = torch.zeros(2, 14)
+    env.scene.robot = robot
+    env.scene.terrain = DummyObj()
+    env.scene.terrain.env_origins = torch.zeros(2, 3)
+    sensor = DummyObj()
+    sensor.data = DummyObj()
+    env.scene.sensors = {"feet_ground_contact": sensor}
+
+    # Step 0: Ground settlement
+    env.common_step_counter = 0
+    sensor.data.found = torch.tensor([[4.0, 4.0], [4.0, 4.0]])
+    robot.data.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.115], [0.0, 0.0, 0.115]])
+    robot.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+    robot.data.root_link_lin_vel_b = torch.zeros(2, 3)
+    robot.data.root_link_lin_vel_w = torch.zeros(2, 3)
+    _update_jump_state(env)
+
+    # Steps 1-3: Flight (accumulates min_airborne_steps = 3)
+    sensor.data.found = torch.zeros(2, 2)
+    robot.data.root_link_pos_w = torch.tensor([[0.10, 0.0, 0.145], [0.10, 0.0, 0.145]])
+    for s in range(1, 4):
+        env.common_step_counter = s
+        _update_jump_state(env)
+
+    # Step 4: Touchdown
+    # Env 0 is upright with feet on ground (legitimate landing): quat = [1,0,0,0], feet found = [4,4]
+    # Env 1 is fallen on face: pitch 90 deg (quat = [0.7071, 0, 0.7071, 0]), feet found = [0,0]
+    env.common_step_counter = 4
+    sensor.data.found = torch.tensor([[4.0, 4.0], [0.0, 0.0]])
+    robot.data.root_link_pos_w = torch.tensor([[0.15, 0.0, 0.115], [0.15, 0.0, 0.05]])
+    robot.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.7071, 0.0, 0.7071, 0.0]])
+    _update_jump_state(env)
+
+    rew = jump_forward_distance_reward(env, target_distance=0.15)
+    assert rew[0].item() > 0.8  # Upright landing gets rewarded
+    assert rew[1].item() == 0.0  # Face-plant gets 0.0!
+
+
+def test_jump_trunk_crash_termination():
+    """Verify that trunk crash terminates immediately if z < 0.075m after takeoff."""
+    import torch
+    from mjlab_microduck.tasks.mdp import (
+        _update_jump_state,
+        jump_trunk_crash,
+    )
+
+    class DummyObj:
+        def __getitem__(self, item):
+            return getattr(self, item, None)
+
+    env = DummyObj()
+    env.num_envs = 1
+    env.device = "cpu"
+    env.scene = DummyObj()
+    robot = DummyObj()
+    robot.data = DummyObj()
+    robot.data.joint_pos = torch.zeros(1, 14)
+    env.scene.robot = robot
+    env.scene.terrain = DummyObj()
+    env.scene.terrain.env_origins = torch.zeros(1, 3)
+    sensor = DummyObj()
+    sensor.data = DummyObj()
+    env.scene.sensors = {"feet_ground_contact": sensor}
+
+    # Before takeoff: crouch z = 0.09m does NOT terminate
+    env.common_step_counter = 0
+    sensor.data.found = torch.tensor([[4.0, 4.0]])
+    robot.data.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.09]])
+    robot.data.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    robot.data.root_link_lin_vel_b = torch.zeros(1, 3)
+    robot.data.root_link_lin_vel_w = torch.zeros(1, 3)
+    _update_jump_state(env)
+    assert jump_trunk_crash(env, min_trunk_z=0.075).item() is False
+
+    # Takeoff occurs
+    env.common_step_counter = 3
+    sensor.data.found = torch.zeros(1, 2)
+    robot.data.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.145]])
+    _update_jump_state(env)
+    assert jump_trunk_crash(env, min_trunk_z=0.075).item() is False
+
+    # Post-takeoff crash: trunk hits ground at z = 0.06m -> terminates!
+    env.common_step_counter = 7
+    robot.data.root_link_pos_w = torch.tensor([[0.05, 0.0, 0.06]])
+    assert jump_trunk_crash(env, min_trunk_z=0.075).item() is True
+
+
+def test_set_jump_spawn_pose_crouch():
+    """Verify that set_jump_spawn_pose sets balanced crouch joint angles and height."""
+    import torch
+    from mjlab_microduck.tasks.mdp import set_jump_spawn_pose
+
+    class DummyObj:
+        def __getitem__(self, item):
+            return getattr(self, item, None)
+
+    env = DummyObj()
+    env.num_envs = 10
+    env.device = "cpu"
+    env.scene = DummyObj()
+    robot = DummyObj()
+    robot.data = DummyObj()
+    robot.data.joint_pos = torch.zeros(10, 14)
+    env.scene.robot = robot
+    env.scene.terrain = DummyObj()
+    env.scene.terrain.env_origins = torch.zeros(10, 3)
+
+    env.sim = DummyObj()
+    env.sim.data = DummyObj()
+    env.sim.data.qpos = torch.zeros(10, 21)
+    env.sim.data.qvel = torch.ones(10, 20)
+
+    # All 10 envs crouch
+    env_ids = torch.arange(10)
+    set_jump_spawn_pose(env, env_ids=env_ids, crouch_prob=1.0)
+
+    # Check that z is 0.103m
+    assert torch.allclose(env.sim.data.qpos[:, 2], torch.full((10,), 0.103))
+    # Check that knee pitches are flexed to ~0.395 and ~ -0.395
+    assert torch.allclose(env.sim.data.qpos[:, 7 + 3], torch.full((10,), 0.3951))
+    assert torch.allclose(env.sim.data.qpos[:, 7 + 12], torch.full((10,), -0.3951))
+    # Check velocities zeroed
+    assert torch.all(env.sim.data.qvel == 0.0)
+
 
 
 

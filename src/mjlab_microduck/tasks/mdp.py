@@ -7210,6 +7210,40 @@ def roulade_lateral_velocity_penalty(
 #     still at spawn earns $0.00 landing reward. Only jumping unlocks the landing annuity.
 
 
+def set_jump_spawn_pose(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    crouch_prob: float = 0.30,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reverse curriculum: spawn a fraction of envs in a balanced crouch pose with feet flat on ground."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    if crouch_prob <= 0.0:
+        return
+    u = torch.rand(len(env_ids), device=env.device)
+    crouch_mask = u < crouch_prob
+    crouch_ids = env_ids[crouch_mask]
+    if len(crouch_ids) == 0:
+        return
+
+    asset: Entity = env.scene[asset_cfg.name]
+    servo_ids = _servo_joint_ids(env, asset)
+    l_hp, l_kn, l_ak = servo_ids[2], servo_ids[3], servo_ids[4]
+    r_hp, r_kn, r_ak = servo_ids[11], servo_ids[12], servo_ids[13]
+
+    # Kinematically verified flat-foot squat: hips flexed +0.30, knees flexed +0.40, ankles dorsiflexed +0.10
+    env.sim.data.qpos[crouch_ids, 7 + l_hp] = -0.4579 + 0.30
+    env.sim.data.qpos[crouch_ids, 7 + l_kn] = -0.0049 + 0.40
+    env.sim.data.qpos[crouch_ids, 7 + l_ak] = 0.4530 + 0.10
+    env.sim.data.qpos[crouch_ids, 7 + r_hp] = 0.4579 - 0.30
+    env.sim.data.qpos[crouch_ids, 7 + r_kn] = 0.0049 - 0.40
+    env.sim.data.qpos[crouch_ids, 7 + r_ak] = -0.4530 - 0.10
+    env.sim.data.qpos[crouch_ids, 2] = env.scene.terrain.env_origins[crouch_ids, 2] + 0.103
+    env.sim.data.qvel[crouch_ids, :] = 0.0
+
+
 def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if not hasattr(env, "_jump_airborne_latch"):
         env._jump_airborne_latch = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
@@ -7372,14 +7406,17 @@ def jump_launch_velocity(
     sensor_name: str = "feet_ground_contact",
     require_both_feet_ground: bool = True,
     target_vz: float = 0.5,
+    target_vx: float = 0.35,
     upright_std: float = 0.25,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward bilateral upward launch impulse prior to takeoff.
+    """Reward bilateral takeoff launch impulse prior to takeoff.
 
+    Combines vertical thrust (vz > 0), forward thrust (vx > 0), and countermovement
+    knee flexion potential prior to takeoff.
     Turns off permanently once takeoff has occurred to ensure strictly ONE push window.
     Requires BOTH feet on the ground so one-legged kicks receive 0.0 reward!
-    ONLY rewards vertical upward velocity (vz > 0) to prevent falling-forward exploitation!
+    Gated strictly on uprightness (|pitch| < 20 deg, |roll| < 15 deg).
     """
     _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
     latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
@@ -7387,7 +7424,17 @@ def jump_launch_velocity(
 
     asset: Entity = env.scene[asset_cfg.name]
     vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
+    vx = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 0], nan=0.0)
     upward_vz = torch.clamp(vz, min=0.0, max=target_vz * 1.5)
+    forward_vx = torch.clamp(vx, min=0.0, max=target_vx * 1.5)
+
+    # Countermovement: knee flexion before push (crouching stores elastic stroke length)
+    q = _servo_joint_pos(env, asset)
+    knee_flex = 0.5 * (torch.clamp(q[:, 3], min=0.0, max=0.6) + torch.clamp(-q[:, 12], min=0.0, max=0.6))
+    crouch_potential = knee_flex / 0.6  # 0.0 at straight legs -> 1.0 at full crouch
+
+    # Launch push combines vertical jump thrust + forward hop impulse + crouch pre-load
+    launch_score = upward_vz + 0.4 * forward_vx + 0.2 * crouch_potential
 
     if require_both_feet_ground and sensor_name in env.scene.sensors:
         found = env.scene.sensors[sensor_name].data.found
@@ -7400,7 +7447,7 @@ def jump_launch_velocity(
     pitch_sq = quat[:, 2].pow(2)
     upright_g = torch.exp(-roll_sq / (0.15 * 0.15) - pitch_sq / (upright_std * upright_std))
 
-    return upward_vz * upright_g * both_feet_ground * active.float()
+    return launch_score * upright_g * both_feet_ground * active.float()
 
 
 def jump_flight_velocity(
@@ -7449,20 +7496,40 @@ def head_posture_penalty(
 def jump_forward_distance_reward(
     env: ManagerBasedRlEnv,
     target_distance: float = 0.15,
+    sensor_name: str = "feet_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward forward displacement (x - x_spawn) achieved through flight.
+    """Reward forward displacement (x - x_spawn) achieved through legitimate flight and upright landing.
 
-    Gated on having achieved legitimate flight so ground shuffling receives 0.
+    Strictly gated on being upright and supported on feet. Face-plants and fallen slides receive 0.0!
     """
-    _update_jump_state(env, asset_cfg=asset_cfg)
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
     latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     asset: Entity = env.scene[asset_cfg.name]
     dx = torch.nan_to_num(
         asset.data.root_link_pos_w[:, 0] - env.scene.terrain.env_origins[:, 0], nan=0.0
     )
     score = torch.clamp(dx / target_distance, min=0.0, max=1.0)
-    return score * latch.float()
+
+    # Must be upright (strictly 0.0 if tilt > 28 degrees)
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    upright = torch.where(tilt_sq < 0.25, torch.exp(-tilt_sq / (0.25 * 0.25)), torch.zeros_like(tilt_sq))
+
+    # After takeoff, if trunk has returned near ground height (z < 0.125m),
+    # feet MUST be in contact with the ground (kills face-down / belly sliding)
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    near_ground = z < 0.125
+    if sensor_name in env.scene.sensors:
+        found = env.scene.sensors[sensor_name].data.found
+        feet_support = (found.view(found.shape[0], -1) > 0).any(dim=-1)
+    else:
+        feet_support = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    ground_valid = (~near_ground) | feet_support
+    return score * latch.float() * upright * ground_valid.float()
 
 
 def jump_compliant_landing(
@@ -7527,7 +7594,9 @@ def jump_compliant_landing(
     vel_sq = v_b.pow(2).sum(dim=-1) + 0.1 * w_b.pow(2).sum(dim=-1)
     vel_score = torch.exp(-vel_sq / 0.15)
 
-    composite = height_score * upright_score * pose_score * (0.5 + 0.5 * vel_score)
+    # Robust blend: upright torso is the mandatory gate; height, pose, and braking provide continuous smooth gradients
+    landing_blend = 0.35 * height_score + 0.35 * pose_score + 0.30 * vel_score
+    composite = upright_score * landing_blend
     return composite * touchdown.float()
 
 
@@ -7638,6 +7707,25 @@ def jump_double_bounce(
     step = int(env.common_step_counter)
     can_check = (step - td_step) > 4
     return touchdown & any_foot_airborne & can_check
+
+
+def jump_trunk_crash(
+    env: ManagerBasedRlEnv,
+    min_trunk_z: float = 0.075,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Terminate episode if trunk drops below min_trunk_z (0.075m, trunk hitting ground).
+
+    Active only after takeoff has occurred so crouch pre-load at spawn is not cut short.
+    """
+    _update_jump_state(env, asset_cfg=asset_cfg)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
+    asset: Entity = env.scene[asset_cfg.name]
+    z = torch.nan_to_num(
+        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
+    )
+    crashed = (z < min_trunk_z) & takeoff
+    return crashed
 
 
 

@@ -136,8 +136,8 @@ def make_microduck_jump_env_cfg(
         cfg.rewards["action_rate_l2"].weight = -0.005
 
     # ── Add Jump Task Rewards ─────────────────────────────────────────────────
-    # 1. Bilateral takeoff launch: rewards explosive upward push (vz > 0) prior to takeoff.
-    # Strictly excludes forward vx on ground to prevent leaning/falling forward exploitation!
+    # 1. Bilateral takeoff launch: rewards explosive push (vz > 0, vx > 0) and crouch pre-load
+    # prior to takeoff. Gated strictly on uprightness and both feet grounded.
     cfg.rewards["jump_launch"] = RewardTermCfg(
         func=microduck_mdp.jump_launch_velocity,
         weight=4.0,
@@ -145,6 +145,7 @@ def make_microduck_jump_env_cfg(
             "sensor_name": "feet_ground_contact",
             "require_both_feet_ground": True,
             "target_vz": 0.5,
+            "target_vx": 0.35,
             "upright_std": 0.25,
         },
     )
@@ -183,10 +184,14 @@ def make_microduck_jump_env_cfg(
     )
 
     # 5. Forward distance reward: rewards forward displacement (x - x_spawn) achieved through flight
+    # Strictly gated on uprightness and feet contact upon touchdown.
     cfg.rewards["jump_forward_dist"] = RewardTermCfg(
         func=microduck_mdp.jump_forward_distance_reward,
         weight=3.0,
-        params={"target_distance": 0.15},
+        params={
+            "target_distance": 0.15,
+            "sensor_name": "feet_ground_contact",
+        },
     )
 
     # 6. Compliant landing & standing recovery: absorbs impact with a knee crouch upon touchdown,
@@ -241,6 +246,14 @@ def make_microduck_jump_env_cfg(
         mode="reset",
     )
 
+    # Reverse curriculum spawn mix: 30% crouch spawns in training, 0% during play
+    if not play:
+        cfg.events["jump_spawn_mix"] = EventTermCfg(
+            func=microduck_mdp.set_jump_spawn_pose,
+            mode="reset",
+            params={"crouch_prob": 0.30},
+        )
+
     # Spawn consistently at origin facing forward along +x, feet firmly on the ground:
     # (Velocity recipe drops robot from z=(0.12, 0.13) with random yaw, which disrupts jump initiation)
     cfg.events["reset_base"].params["pose_range"] = {
@@ -256,10 +269,16 @@ def make_microduck_jump_env_cfg(
         del cfg.events["push_robot"]
 
     # ── Terminations ──────────────────────────────────────────────────────────
-    # Early reset if robot falls over beyond 55 degrees tilt (allows forward crouch & landing absorption)
+    # Early reset if robot falls over beyond 45 degrees tilt (allows forward crouch & landing absorption)
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=mdp.bad_orientation,
-        params={"limit_angle": math.radians(55.0), "asset_cfg": SceneEntityCfg("robot")},
+        params={"limit_angle": math.radians(45.0), "asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # Terminate immediately if trunk drops below 0.075m after takeoff (kills face-plant sliding)
+    cfg.terminations["jump_trunk_crash"] = TerminationTermCfg(
+        func=microduck_mdp.jump_trunk_crash,
+        params={"min_trunk_z": 0.075},
     )
 
     # Terminate immediately if robot bounces airborne a second time after touchdown (kills skipping)
