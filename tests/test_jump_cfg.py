@@ -26,6 +26,11 @@ def test_jump_rewards_present_and_signs():
     assert "jump_launch" in cfg.rewards
     assert cfg.rewards["jump_launch"].weight > 0.0
     assert cfg.rewards["jump_launch"].params["require_both_feet_ground"] is True
+    assert cfg.rewards["jump_launch"].params["target_vz"] == 0.5
+
+    assert "jump_flight_vx" in cfg.rewards
+    assert cfg.rewards["jump_flight_vx"].weight > 0.0
+    assert cfg.rewards["jump_flight_vx"].params["target_vx"] == 0.4
 
     assert "jump_air_time" in cfg.rewards
     assert cfg.rewards["jump_air_time"].weight > 0.0
@@ -44,15 +49,14 @@ def test_jump_rewards_present_and_signs():
     assert cfg.rewards["jump_landing"].params["crouch_height"] == 0.100
 
     # Negative penalty / cost terms
+    assert "head_posture_lock" in cfg.rewards
+    assert cfg.rewards["head_posture_lock"].weight < 0.0
+
     assert "jump_lateral_vel" in cfg.rewards
     assert cfg.rewards["jump_lateral_vel"].weight < 0.0
 
     assert "jump_yaw_rate" in cfg.rewards
     assert cfg.rewards["jump_yaw_rate"].weight < 0.0
-
-    assert "head_pitch_limit" in cfg.rewards
-    assert cfg.rewards["head_pitch_limit"].weight < 0.0
-    assert cfg.rewards["head_pitch_limit"].params["max_angle_rad"] == math.radians(30.0)
 
     assert "jump_foot_impact" in cfg.rewards
     assert cfg.rewards["jump_foot_impact"].weight < 0.0
@@ -122,7 +126,7 @@ def test_terminations():
     assert cfg.terminations["head_pitch_exceeded"].params["max_angle_rad"] == math.radians(45.0)
     assert "push_robot" not in cfg.events
     assert "upright" not in cfg.rewards
-    assert "jump_spawn_mix" in cfg.events
+    assert "jump_spawn_mix" not in cfg.events
 
 
 def test_jump_task_registered():

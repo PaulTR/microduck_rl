@@ -7245,15 +7245,12 @@ def _update_jump_state(
             found = env.scene.sensors[sensor_name].data.found
             # both_feet_airborne: full flight (no feet touching floor)
             both_feet_airborne = (found.view(found.shape[0], -1) == 0).all(dim=-1)
-            # any_foot_airborne: at least one foot lifted off the floor
-            any_foot_airborne = (found.view(found.shape[0], -1) == 0).any(dim=-1)
             both_feet_ground = (found.view(found.shape[0], -1) > 0).all(dim=-1)
-            feet_on_ground = ~both_feet_airborne
+            any_foot_ground = (found.view(found.shape[0], -1) > 0).any(dim=-1)
         else:
             both_feet_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-            any_foot_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
             both_feet_ground = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
-            feet_on_ground = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            any_foot_ground = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
 
         z = torch.nan_to_num(
             asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
@@ -7264,11 +7261,11 @@ def _update_jump_state(
         tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
         upright_ok = tilt_sq < 0.35
 
-        # 1. First confirm robot is settled on the ground before arming takeoff
+        # 1. Confirm robot is settled on the ground before arming takeoff
         ground_settled[:] = ground_settled | both_feet_ground
 
-        # 2. Takeoff latch flips True the very first time ANY foot leaves ground AFTER being grounded
-        takeoff[:] = takeoff | (ground_settled & any_foot_airborne)
+        # 2. Takeoff occurs when BOTH feet leave the ground while cleared for height
+        takeoff[:] = takeoff | (ground_settled & both_feet_airborne & height_ok)
 
         is_airborne_now = both_feet_airborne & height_ok & upright_ok
         # Accumulate airborne steps before touchdown
@@ -7278,10 +7275,10 @@ def _update_jump_state(
         legit_flight = count >= min_airborne_steps
         latch[:] = latch | legit_flight
 
-        # Touchdown occurs when feet make contact AFTER takeoff has occurred
-        newly_landed = takeoff & feet_on_ground & (~touchdown)
+        # Touchdown occurs when feet make contact AFTER legitimate takeoff has occurred
+        newly_landed = takeoff & any_foot_ground & (~touchdown)
         td_step[newly_landed] = step
-        touchdown[:] = touchdown | (takeoff & feet_on_ground)
+        touchdown[:] = touchdown | (takeoff & any_foot_ground)
 
         env._jump_last_update_step = step
 
@@ -7301,53 +7298,6 @@ def reset_jump_state(
     takeoff[env_ids] = False
     ground_settled[env_ids] = False
     env._jump_last_update_step = -1
-
-
-def set_jump_spawn_pose(
-    env: ManagerBasedRlEnv,
-    env_ids: torch.Tensor,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    crouch_prob: float = 0.35,
-) -> None:
-    """Reset event that spawns a fraction of envs in a ready-to-launch squat pose.
-
-    Built-in reverse curriculum: provides dense on-policy data on the explosive
-    takeoff -> flight -> landing -> standing sequence from iteration 0, preventing
-    the policy from getting trapped in the frozen-standing local minimum.
-    """
-    if env_ids is None or len(env_ids) == 0:
-        return
-    env_ids = env_ids.to(env.device, dtype=torch.long)
-    if crouch_prob <= 0.0:
-        return
-    u = torch.rand(len(env_ids), device=env.device)
-    crouch_mask = u < crouch_prob
-    crouch_ids = env_ids[crouch_mask]
-    if len(crouch_ids) == 0:
-        return
-
-    asset: Entity = env.scene[asset_cfg.name]
-    if not hasattr(env, "_jump_crouch_jnt_ids"):
-        l_hp, _ = asset.find_joints([r"^(?!passive_).*left_hip_pitch.*"])
-        l_kn, _ = asset.find_joints([r"^(?!passive_).*left_knee.*"])
-        l_ak, _ = asset.find_joints([r"^(?!passive_).*left_ankle.*"])
-        r_hp, _ = asset.find_joints([r"^(?!passive_).*right_hip_pitch.*"])
-        r_kn, _ = asset.find_joints([r"^(?!passive_).*right_knee.*"])
-        r_ak, _ = asset.find_joints([r"^(?!passive_).*right_ankle.*"])
-        env._jump_crouch_jnt_ids = (l_hp[0], l_kn[0], l_ak[0], r_hp[0], r_kn[0], r_ak[0])
-
-    l_hp, l_kn, l_ak, r_hp, r_kn, r_ak = env._jump_crouch_jnt_ids
-
-    # Symmetrical squat overrides (hips flexed, knees flexed, ankles dorsiflexed)
-    env.sim.data.qpos[crouch_ids, 7 + l_hp] = -0.4579 - 0.35
-    env.sim.data.qpos[crouch_ids, 7 + l_kn] = -0.0049 + 0.70
-    env.sim.data.qpos[crouch_ids, 7 + l_ak] = 0.4530 - 0.35
-    env.sim.data.qpos[crouch_ids, 7 + r_hp] = 0.4579 + 0.35
-    env.sim.data.qpos[crouch_ids, 7 + r_kn] = 0.0049 - 0.70
-    env.sim.data.qpos[crouch_ids, 7 + r_ak] = -0.4530 + 0.35
-    # Lower trunk z to 0.090m so feet remain flat on the floor in squat
-    env.sim.data.qpos[crouch_ids, 2] = 0.090
-    env.sim.data.qvel[crouch_ids, :] = 0.0
 
 
 def jump_air_time_reward(
@@ -7421,41 +7371,24 @@ def jump_launch_velocity(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
     require_both_feet_ground: bool = True,
-    max_height: float = 0.135,
-    upright_std: float = 0.35,
-    target_vx: float = 0.4,
-    target_vz: float = 0.6,
+    target_vz: float = 0.5,
+    upright_std: float = 0.25,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward countermovement crouch compression and explosive bilateral takeoff push.
+    """Reward bilateral upward launch impulse prior to takeoff.
 
     Turns off permanently once takeoff has occurred to ensure strictly ONE push window.
     Requires BOTH feet on the ground so one-legged kicks receive 0.0 reward!
+    ONLY rewards vertical upward velocity (vz > 0) to prevent falling-forward exploitation!
     """
     _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
     latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
     active = ground_settled & (~takeoff) & (~touchdown)
 
     asset: Entity = env.scene[asset_cfg.name]
-    z = torch.nan_to_num(
-        asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2], nan=0.0
-    )
-    # Forward velocity in body frame, vertical in world frame
-    vx = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 0], nan=0.0)
     vz = torch.nan_to_num(asset.data.root_link_lin_vel_w[:, 2], nan=0.0)
-    forward_vx = torch.clamp(vx, min=0.0, max=target_vx * 1.5)
     upward_vz = torch.clamp(vz, min=0.0, max=target_vz * 1.5)
 
-    # Knee flexion countermovement (squatting down to store stroke length before push)
-    # Knees bend positive on left, negative on right in HOME frame
-    q = _servo_joint_pos(env, asset)
-    knee_flex = 0.5 * (torch.clamp(q[:, 3], min=0.0, max=0.7) + torch.clamp(-q[:, 12], min=0.0, max=0.7))
-    squat_progress = knee_flex / 0.7  # 0.0 at standing -> 1.0 at deep squat
-
-    # Launch velocity combines explosive extension velocity + crouch potential
-    launch_vel = 0.5 * forward_vx + upward_vz + 0.3 * squat_progress
-
-    # Bilateral ground contact: both feet must be in contact during takeoff push!
     if require_both_feet_ground and sensor_name in env.scene.sensors:
         found = env.scene.sensors[sensor_name].data.found
         both_feet_ground = (found.view(found.shape[0], -1) > 0).all(dim=-1).float()
@@ -7465,39 +7398,52 @@ def jump_launch_velocity(
     quat = asset.data.root_link_quat_w
     roll_sq = quat[:, 1].pow(2)
     pitch_sq = quat[:, 2].pow(2)
-    # Tighter on roll (no cartwheeling), generous on pitch to allow natural forward lean during takeoff
     upright_g = torch.exp(-roll_sq / (0.15 * 0.15) - pitch_sq / (upright_std * upright_std))
 
-    return launch_vel * (z < max_height).float() * upright_g * both_feet_ground * active.float()
+    return upward_vz * upright_g * both_feet_ground * active.float()
 
 
-def leg_similarity_reward(
+def jump_flight_velocity(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    target_vx: float = 0.4,
+    upright_std: float = 0.35,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward forward velocity (vx > 0) specifically while airborne in flight.
+
+    Active strictly while both feet are off the ground prior to touchdown.
+    """
+    _update_jump_state(env, sensor_name=sensor_name, asset_cfg=asset_cfg)
+    latch, count, touchdown, td_step, takeoff, ground_settled = _jump_state(env)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    vx = torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 0], nan=0.0)
+    forward_vx = torch.clamp(vx, min=0.0, max=target_vx * 1.5)
+
+    quat = asset.data.root_link_quat_w
+    roll_sq = quat[:, 1].pow(2)
+    pitch_sq = quat[:, 2].pow(2)
+    upright_g = torch.exp(-roll_sq / (0.15 * 0.15) - pitch_sq / (upright_std * upright_std))
+
+    in_flight = takeoff & (~touchdown)
+    return forward_vx * upright_g * in_flight.float()
+
+
+def head_posture_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    joint_bases: tuple = ("hip_pitch", "knee", "ankle"),
 ) -> torch.Tensor:
-    """Soft guidance encouraging left and right leg positions to be similar.
+    """Penalize any deviation of the 4 head servos from nominal HOME posture.
 
-    Provides a smooth Gaussian reward exp(-diff / 0.3) so both legs push together
-    without imposing rigid mathematical symmetry constraints.
+    Prevents the policy from exploiting the 38%-of-body-mass head as a momentum whip.
+    Returns >= 0 (use negative weight in cfg).
     """
     asset: Entity = env.scene[asset_cfg.name]
-    if not hasattr(env, "_leg_sim_ids"):
-        left, right = [], []
-        for base in joint_bases:
-            li, _ = asset.find_joints([f"left_{base}"])
-            ri, _ = asset.find_joints([f"right_{base}"])
-            left.append(li[0])
-            right.append(ri[0])
-        env._leg_sim_ids = (
-            torch.tensor(left, device=env.device),
-            torch.tensor(right, device=env.device),
-        )
-    lids, rids = env._leg_sim_ids
-    q = asset.data.joint_pos
-    # Sagittal joints have opposite signs on left vs right in HOME frame
-    diff = torch.abs(q[:, lids] + q[:, rids]).mean(dim=-1)
-    return torch.exp(-diff / 0.3)
+    q = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    diff = q[:, 5:9] - default_pos[:, 5:9]
+    return diff.pow(2).sum(dim=-1)
 
 
 def jump_forward_distance_reward(
@@ -7570,12 +7516,9 @@ def jump_compliant_landing(
     pose_err = (cur_pos - target_pos).abs()
 
     # During initial impact absorption (steps <= crouch_steps), relax knee restriction
+    # Canonical servo indices: left_knee = 3, right_knee = 12
     knee_mask = torch.ones_like(pose_err)
-    if not hasattr(env, "_knee_joint_ids"):
-        lk_id, _ = asset.find_joints([r"^(?!passive_).*left_knee.*"])
-        rk_id, _ = asset.find_joints([r"^(?!passive_).*right_knee.*"])
-        env._knee_joint_ids = [lk_id[0], rk_id[0]]
-    knee_mask[:, env._knee_joint_ids] = rise_progress.unsqueeze(-1)
+    knee_mask[:, [3, 12]] = rise_progress.unsqueeze(-1)
     pose_score = torch.exp(-((pose_err * knee_mask) / pose_std) ** 2).mean(dim=-1)
 
     # Velocity damping after touchdown: robot should brake forward motion and stand still
