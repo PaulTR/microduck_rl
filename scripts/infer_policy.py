@@ -731,6 +731,9 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
+        elif self.jump_only:
+            self.current_policy = "jump"
+            self.ort_session = self.behavior_sessions["jump"]
         else:
             # sitstand-only setup: the sitstand policy holds the stand (flag 0).
             self.current_policy = "sit"
@@ -1034,7 +1037,7 @@ def main():
     qpos_adr = model.jnt_qposadr[freejoint_id]
     data.qpos[qpos_adr + 0] = 0.0
     data.qpos[qpos_adr + 1] = 0.0
-    data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125  # rollers add 13.5mm height
+    data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.115  # rollers add height; 0.115 is STAND_Z
     data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
     for i, qpos_idx in enumerate(policy.joint_qpos_indices):
         data.qpos[qpos_idx] = policy.default_pose[i]
@@ -1125,7 +1128,7 @@ def main():
         nonlocal control_step_count, jump_once_pending, start_time, policy_enabled
         data.qpos[qpos_adr + 0] = 0.0
         data.qpos[qpos_adr + 1] = 0.0
-        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125
+        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.115
         data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
         for i, qpos_idx in enumerate(policy.joint_qpos_indices):
             data.qpos[qpos_idx] = policy.default_pose[i]
@@ -1224,7 +1227,12 @@ def main():
             elif key == "r":
                 policy.trigger_behavior("roulade")
             elif key == "j":
-                policy.trigger_behavior("jump")
+                if "jump" in policy.behavior_sessions:
+                    reset_sim()
+                    jump_once_pending = False
+                    policy.trigger_behavior("jump")
+                else:
+                    policy.trigger_behavior("jump")
             elif key == "q":
                 quit_requested = True
                 print("Quit requested")
@@ -1301,7 +1309,7 @@ def main():
     print("  K:                kick with LEFT foot (requires --kick-left)")
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
-    print("  J:                jump (requires --jump)")
+    print("  J:                reset sim & jump (requires --jump)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  X / Backspace:    reset simulation & robot to initial standing spawn")
     print("  Q:                quit")
@@ -1341,7 +1349,8 @@ def main():
                 for key in term.get_keys():
                     handle_key(key)
 
-                if jump_once_pending and (step_start - start_time) >= 0.5:
+                delay = 0.05 if policy.jump_only else 0.5
+                if jump_once_pending and (step_start - start_time) >= delay:
                     policy.trigger_behavior("jump")
                     jump_once_pending = False
 
