@@ -477,6 +477,15 @@ class PolicyInference:
         """
         if self.new_cmd_obs:
             if self.behavior_mode is not None:
+                if self.behavior_mode == "jump":
+                    dur = max(self.behavior_durations.get("jump", 3.0), 1e-5)
+                    jump_phase = float(np.clip((dur - self.behavior_time_left) / dur, 0.0, 1.0))
+                    cmd = np.zeros(13, dtype=np.float32)
+                    cmd[0] = np.cos(2 * np.pi * jump_phase)
+                    cmd[1] = np.sin(2 * np.pi * jump_phase)
+                    cmd[2] = 0.0
+                    self.command = cmd
+                    return
                 # Kick/roulade were trained with an all-zero 13D command
                 # (twist ~0, head/body slots zero-padded) — feeding stale
                 # head/body commands would be out-of-distribution.
