@@ -247,17 +247,17 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         params={"upright_std": 0.25},
     )
 
-    # 7. Flight-gated landing on two feet in crouch (absorbing impact on feet, no butt landing)
+    # 7. Flight-gated landing on two feet straight into standing posture (NO landing crouch)
     cfg.rewards["jump_two_foot_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_two_foot_landing,
         weight=4.0,
         params={
             "sensor_name": feet_ground_cfg.name,
             "non_foot_sensor_name": non_foot_ground_cfg.name,
-            "landing_start": 0.55,
+            "landing_start": 0.50,
             "landing_end": 0.75,
-            "crouch_z": CROUCH_Z,
-            "crouch_std": 0.02,
+            "target_height": STAND_Z,
+            "height_std": 0.03,
             "upright_std": 0.35,
             "command_name": "twist",
         },
@@ -277,7 +277,18 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
 
-    # 10. Flight-gated return to stand annuity (gated: pays zero if butt touches ground!)
+    # 10. Anti-landing-crouch penalty: penalizes any low-trunk squat/crouch upon and after landing
+    cfg.rewards["jump_post_landing_crouch"] = RewardTermCfg(
+        func=microduck_mdp.jump_post_landing_crouch_penalty,
+        weight=-5.0,
+        params={
+            "min_height": 0.095,
+            "landing_start": 0.55,
+            "command_name": "twist",
+        },
+    )
+
+    # 11. Flight-gated return to stand annuity (straight legs, nominal HOME pose at STAND_Z)
     cfg.rewards["jump_return_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_return_stand_composite,
         weight=5.0,
@@ -286,7 +297,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             "height_std": 0.03,
             "upright_std": 0.35,
             "pose_std": 0.35,
-            "stand_start": 0.72,
+            "stand_start": 0.60,
             "stand_end": 1.00,
             "sensor_name": feet_ground_cfg.name,
             "non_foot_sensor_name": non_foot_ground_cfg.name,
@@ -294,24 +305,24 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 11. Post-landing anti-hop penalty: penalize lifting feet after landing
+    # 12. Post-landing anti-hop penalty: penalize lifting feet after landing
     cfg.rewards["jump_post_landing_hop"] = RewardTermCfg(
         func=microduck_mdp.jump_post_landing_hop_penalty,
         weight=-3.0,
         params={
             "sensor_name": feet_ground_cfg.name,
-            "stand_start": 0.72,
+            "stand_start": 0.60,
             "stand_end": 1.00,
             "command_name": "twist",
         },
     )
 
-    # 12. Post-landing stillness penalty: damp out residual motion once landed to stick the landing
+    # 13. Post-landing stillness penalty: damp out residual motion once landed to stick the landing
     cfg.rewards["jump_stillness"] = RewardTermCfg(
         func=microduck_mdp.jump_post_landing_stillness_penalty,
         weight=-1.5,
         params={
-            "stand_start": 0.72,
+            "stand_start": 0.60,
             "stand_end": 1.00,
             "command_name": "twist",
             "sensor_name": feet_ground_cfg.name,

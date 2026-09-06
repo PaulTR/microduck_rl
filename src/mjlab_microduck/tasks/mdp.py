@@ -7580,23 +7580,31 @@ def jump_two_foot_landing(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
     non_foot_sensor_name: str = "non_foot_ground_contact",
-    landing_start: float = 0.55,
+    landing_start: float = 0.50,
     landing_end: float = 0.75,
-    crouch_z: float = JUMP_CROUCH_Z,
-    crouch_std: float = 0.02,
+    target_height: float = JUMP_STAND_Z,
+    height_std: float = 0.03,
     upright_std: float = 0.35,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    crouch_z: float | None = None,
+    crouch_std: float | None = None,
 ) -> torch.Tensor:
-    """Flight-gated reward for landing on two feet in a clean crouch (absorbing impact like launch).
+    """Flight-gated reward for landing on two feet straight into standing posture.
 
+    No landing crouch: robot lands directly on its feet and immediately stands straight up.
     Must:
       1. Have achieved continuous flight (flight gate).
       2. Touch down on both feet simultaneously.
-      3. Lower trunk to crouch height (crouch_z ≈ 0.065 m) to absorb the landing on feet.
+      3. Maintain trunk at upright standing height (target_height = STAND_Z ≈ 0.115 m).
       4. Maintain vertical trunk orientation.
       5. Zero non-foot contact (butt, trunk, hips, knees must NOT touch the ground).
     """
+    if crouch_z is not None:
+        target_height = crouch_z
+    if crouch_std is not None:
+        height_std = crouch_std
+
     _update_jump_state(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name)
     gate = jump_flight_gate(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name)
     phase = jump_phase_from_command(env, command_name)
@@ -7611,7 +7619,7 @@ def jump_two_foot_landing(
 
     asset: Entity = env.scene[asset_cfg.name]
     z = asset.data.root_link_pos_w[:, 2]
-    crouch_score = torch.exp(-((z - crouch_z) / crouch_std).pow(2))
+    h_score = torch.exp(-((z - target_height) / height_std).pow(2))
 
     quat = asset.data.root_link_quat_w
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
@@ -7620,7 +7628,27 @@ def jump_two_foot_landing(
     # Butt/trunk contact check: if the butt touches the ground, landing earns ZERO
     no_butt = (~env._jump_has_butt_contact).float()
 
-    return gate * window * both_feet_down * crouch_score * upright * no_butt
+    return gate * window * both_feet_down * h_score * upright * no_butt
+
+
+def jump_post_landing_crouch_penalty(
+    env: ManagerBasedRlEnv,
+    min_height: float = 0.095,
+    landing_start: float = 0.55,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes remaining in a crouch or low posture after flight touchdown.
+
+    Positive quantity; use negative weight. Actively drives trunk up into full stand.
+    """
+    gate = jump_flight_gate(env)
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, landing_start, 1.00)
+    asset: Entity = env.scene[asset_cfg.name]
+    z = asset.data.root_link_pos_w[:, 2]
+    deficit = torch.clamp(min_height - z, min=0.0)
+    return gate * window * deficit
 
 
 def jump_return_stand_composite(

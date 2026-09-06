@@ -44,6 +44,7 @@ def test_jump_cfg_rewards_present_and_signs():
     assert "jump_two_foot_landing" in r and r["jump_two_foot_landing"].weight > 0
     assert "jump_non_foot_contact" in r and r["jump_non_foot_contact"].weight < 0
     assert "gentle_landing" in r and r["gentle_landing"].weight > 0  # self-negating (|a_z|)
+    assert "jump_post_landing_crouch" in r and r["jump_post_landing_crouch"].weight < 0
     assert "jump_return_stand" in r and r["jump_return_stand"].weight > 0
     assert "jump_post_landing_hop" in r and r["jump_post_landing_hop"].weight < 0
     assert "jump_stillness" in r and r["jump_stillness"].weight < 0
@@ -185,7 +186,7 @@ def test_jump_butt_contact_gating():
 
     class _MockRobotData:
         def __init__(self, num_envs):
-            self.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.065]], dtype=torch.float32).repeat(num_envs, 1)
+            self.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.115]], dtype=torch.float32).repeat(num_envs, 1)
             self.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).repeat(num_envs, 1)
             self.joint_pos = torch.zeros(num_envs, 14)
 
@@ -233,9 +234,9 @@ def test_jump_butt_contact_gating():
         env,
         sensor_name="feet_ground_contact",
         non_foot_sensor_name="non_foot_ground_contact",
-        landing_start=0.55,
+        landing_start=0.50,
         landing_end=0.75,
-        crouch_z=0.065,
+        target_height=0.115,
     )
     # Env 0 (clean landing on feet) should earn positive reward
     assert reward[0] > 0.0

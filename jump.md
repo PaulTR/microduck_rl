@@ -24,14 +24,15 @@ The jump is parameterized over a 3.0 s period ($T = 3.0$ s) with phase $\phi \in
 4. **Airborne Flight ($\phi \in [0.35, 0.65]$ | $t \in [1.0, 1.9]\text{ s}$)**:
    - Both feet airborne simultaneously (`torch.minimum(air_l, air_r)`).
    - Flight qualification gate (`jump_flight_gate`) unlocks landing rewards only once $\ge 80\text{ ms}$ continuous air time is achieved.
-5. **Two-Footed Landing in Crouch ($\phi \in [0.55, 0.75]$ | $t \in [1.65, 2.25]\text{ s}$)**:
-   - **Crouch Shock Absorption on Feet**: Rewards landing in the crouched position (`CROUCH_Z = 0.065 m`) with both feet flat on the ground and trunk upright.
+5. **Two-Footed Landing Directly into Stand ($\phi \in [0.50, 0.75]$ | $t \in [1.50, 2.25]\text{ s}$)**:
+   - **No Landing Crouch**: Robot lands directly on its feet and immediately stands straight up at `STAND_Z = 0.115 m` with legs extended.
+   - **Anti-Landing-Crouch Penalty**: `jump_post_landing_crouch_penalty` (weight -5.0) actively taxes remaining in a crouch or low posture ($z < 0.095\text{ m}$), providing a steep gradient that forces the robot to extend its legs and stand up straight.
    - **Strict Non-Foot Ground Contact Termination**: If head/beak, butt/battery, hips, or knees touch the ground at ANY point, the episode **terminates instantly** (`non_foot_contact` termination). Falling on the face or butt and standing back up is physically impossible because the episode immediately ends!
    - **Tilt Fall Termination**: If trunk tilts $> 37^\circ$ (`fell_over` termination with `limit_angle=0.65`), the episode terminates immediately.
-6. **Return to Vertical Stand & Stillness ($\phi \in [0.72, 1.00]$ | $t \in [2.16, 3.0]\text{ s}$)**:
-   - Recovers trunk from crouch to `STAND_Z = 0.115 m`, body and head upright, HOME joint pose.
+6. **Return to Vertical Stand & Stillness ($\phi \in [0.60, 1.00]$ | $t \in [1.80, 3.0]\text{ s}$)**:
+   - Maintains full standing height `STAND_Z = 0.115 m`, body and head upright, HOME nominal joint pose (straight legs).
    - **Clean-Landing Gate**: Only pays if the robot completed flight and landed on its feet without falling.
-   - Stillness penalty (`jump_post_landing_stillness_penalty`) damps linear and angular velocity once landed to prevent shuffling.
+   - Stillness penalty (`jump_post_landing_stillness_penalty`) damps linear and angular velocity once landed to stick the landing without shuffling.
    - Post-landing hop penalty (`jump_post_landing_hop`) strictly taxes lifting feet after landing.
 
 ---
@@ -92,7 +93,7 @@ uv run scripts/infer_policy.py --jump output.onnx --new-cmd-obs
 - **How it works**:
   - The robot starts standing upright in place (phase 0).
   - Press **`J`** or **`SPACE`** in the terminal to trigger the jump!
-  - Microduck crouches, launches straight up, stays airborne, lands on two feet in a clean crouch, and recovers to an upright standing posture.
+  - Microduck crouches, launches straight up, stays airborne, lands directly on two feet with straight legs, and maintains an upright standing posture.
   - Once finished, it remains standing in place, ready for you to press **`J`** or **`SPACE`** to jump again.
 
 ---
@@ -102,10 +103,11 @@ uv run scripts/infer_policy.py --jump output.onnx --new-cmd-obs
 Key metrics to watch per iteration:
 - `Episode_Reward/jump_takeoff_velocity`: Rises as vertical upward velocity reaches ~1.0 m/s.
 - `Episode_Reward/jump_flight_air_time`: Tracks airborne flight progression.
-- `Episode_Reward/jump_two_foot_landing`: Pays for landing on feet in crouch height (`CROUCH_Z = 0.065 m`) without butt contact.
+- `Episode_Reward/jump_two_foot_landing`: Pays for landing on two feet straight at standing height (`STAND_Z = 0.115 m`) without butt contact.
+- `Episode_Reward/jump_post_landing_crouch`: Anti-crouch penalty (must remain **$\le 0$** and approach 0 as robot stands straight).
 - `Episode_Reward/jump_return_stand`: Dominant annuity once full jump sequence succeeds without butt contact.
 - `Episode_Reward/jump_non_foot_contact`: Tracks ground contact by trunk/butt/hips. Must remain **$\le 0$** and trend toward 0.
-- All penalties (`jump_horizontal_vel`, `jump_verticality`, `jump_stillness`, `jump_crouch_feet_lift`, `jump_post_landing_hop`) must remain **$\le 0$**.
+- All penalties (`jump_horizontal_vel`, `jump_verticality`, `jump_stillness`, `jump_crouch_feet_lift`, `jump_post_landing_hop`, `jump_post_landing_crouch`) must remain **$\le 0$**.
 
 ---
 
