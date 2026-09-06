@@ -833,6 +833,21 @@ class PolicyInference:
         self._update_command()
         print(f"{name}: done → back to {self.current_policy}")
 
+    def reset_state(self):
+        """Reset internal policy state to initial standing."""
+        self.behavior_mode = None
+        self.behavior_time_left = 0.0
+        self.vel_cmd = np.zeros(3, dtype=np.float32)
+        self.last_action = np.zeros(self.n_joints, dtype=np.float32)
+        self.action_history = np.zeros((self.delay_max_lag + 1, self.n_joints), dtype=np.float32)
+        self.head_offset = np.zeros(4, dtype=np.float32)
+        self.body_cmd = np.zeros(6, dtype=np.float32)
+        if "jump" in self.behavior_sessions and not self.walking_session and not self.standing_session:
+            self.current_policy = "jump"
+            self.ort_session = self.behavior_sessions["jump"]
+        self._update_command()
+        self.set_position_targets(self.default_pose)
+
     def toggle_sit(self):
         """Toggle sitting on/off (Y key).
 
@@ -1231,6 +1246,21 @@ def main():
         data.qvel[_trunk_qvel_adr + 1] = vy
         print(f"PUSH applied: v=[{vx:.2f}, {vy:.2f}, 0] m/s (angle={np.degrees(angle):.0f}°)")
 
+    def reset_robot():
+        """Reset robot pose, velocities, and policy state back to initial spawn."""
+        data.qpos[qpos_adr + 0] = 0.0
+        data.qpos[qpos_adr + 1] = 0.0
+        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+        data.qvel[:] = 0.0
+        for i, qpos_idx in enumerate(policy.joint_qpos_indices):
+            data.qpos[qpos_idx] = policy.default_pose[i]
+        if bam_ctrl is not None:
+            bam_ctrl.reset(data.qpos)
+        policy.reset_state()
+        mujoco.mj_forward(model, data)
+        print("\n[reset] Robot reset to initial standing position")
+
     # Keys come from the TERMINAL (raw stdin, see TerminalInput) — not from the
     # MuJoCo viewer window, whose keypresses also fire built-in visualization
     # shortcuts. `key` is a symbolic name: "up"/"down"/"left"/"right", " ", or
@@ -1311,6 +1341,8 @@ def main():
                 policy.trigger_behavior("roulade")
             elif key == "j":
                 policy.trigger_behavior("jump")
+            elif key == "x":
+                reset_robot()
             elif key == "q":
                 quit_requested = True
                 print("Quit requested")
@@ -1379,6 +1411,7 @@ def main():
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
     print("  J:                forward jump (requires --jump)")
+    print("  X:                reset robot to initial spawn position")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")

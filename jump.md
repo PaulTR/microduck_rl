@@ -86,15 +86,16 @@ uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microd
 ```
 
 ### Step 6: Standalone Policy Playback in MuJoCo Viewer
-You do not need a `walk.onnx` policy — the jump policy runs completely standalone:
+You do not need any walking policy — the jump policy runs completely standalone:
 ```bash
-uv run scripts/infer_policy.py --jump output.onnx --new-cmd-obs
+uv run scripts/infer_policy.py --jump export.onnx --new-cmd-obs
 ```
 - **How it works**:
-  - The robot starts standing upright in place (phase 0).
-  - Press **`J`** or **`SPACE`** in the terminal to trigger the jump!
-  - Microduck crouches, launches straight up, stays airborne, lands directly on two feet with straight legs, and maintains an upright standing posture.
-  - Once finished, it remains standing in place, ready for you to press **`J`** or **`SPACE`** to jump again.
+  - The robot starts standing upright in place at spawn.
+  - Press **`J`** in the terminal to execute the jump (crouch → explosive takeoff → airborne → straight-leg landing → stand).
+  - Once the jump finishes, it stays standing in place, ready for you to press **`J`** to jump again.
+  - Press **`X`** at any time to instantly reset the robot and simulation back to the initial spawn standing position.
+  - Press **`Q`** to quit.
 
 ---
 
