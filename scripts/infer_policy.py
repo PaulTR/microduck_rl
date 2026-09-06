@@ -1008,7 +1008,7 @@ def main():
     parser.add_argument("--jump", type=str, default=None, help="Path to jump policy ONNX (press J to trigger jump, X to reset). Requires --new-cmd-obs. Can run standalone.")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
-    parser.add_argument("--jump-duration", type=float, default=2.0, help="Jump phase period in seconds (default: 2.0)")
+    parser.add_argument("--jump-duration", type=float, default=1.2, help="Jump phase period in seconds (default: 1.2)")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")

@@ -22,45 +22,59 @@ def test_jump_task_registration():
 
 
 def test_jump_cfg_rewards():
-    """Jump reward structure: 4 positive task objectives + 4 anti-exploit penalties."""
+    """Jump reward structure: 6 positive task objectives + 5 anti-exploit penalties."""
     cfg = make_microduck_jump_env_cfg()
     r = cfg.rewards
 
-    # 1. Apex height: dense Gaussian reward pulling trunk height up to APEX_Z
-    assert "jump_apex_height" in r
-    assert r["jump_apex_height"].weight == 5.0
-    assert r["jump_apex_height"].params["target_height"] == 0.170
+    # 1. Crouch / Countermovement (phi ∈ [0.00, 0.25]): Lower CoM to CROUCH_Z
+    assert "jump_crouch" in r
+    assert r["jump_crouch"].weight == 4.0
+    assert r["jump_crouch"].params["target_height"] == 0.085
 
-    # 2. Airborne bonus: reward when both feet leave the ground
+    # 2. Push-off vertical velocity (phi ∈ [0.20, 0.45]): Monotonic vz > 0 reward
+    assert "jump_push_velocity" in r
+    assert r["jump_push_velocity"].weight == 5.0
+
+    # 3. Airborne bonus (phi ∈ [0.45, 0.65]), strictly gated on upright trunk & height
     assert "jump_airborne" in r
     assert r["jump_airborne"].weight == 4.0
+    assert r["jump_airborne"].params["min_flight_height"] == 0.120
 
-    # 3. Landing & standing: dense composite reward for upright HOME pose at STAND_Z
+    # 3b. Apex height (phi ∈ [0.45, 0.65]): dense Gaussian pulling height to APEX_Z
+    assert "jump_apex_height" in r
+    assert r["jump_apex_height"].weight == 5.0
+    assert r["jump_apex_height"].params["target_height"] == 0.155
+
+    # 4. Landing & standing (phi ∈ [0.65, 1.00]): dense composite reward for upright HOME pose at STAND_Z
     assert "jump_stand" in r
     assert r["jump_stand"].weight == 5.0
     assert r["jump_stand"].params["target_height"] == 0.115
 
-    # 4. Grounded feet bonus after landing
+    # 4b. Grounded feet bonus after landing
     assert "jump_feet_grounded" in r
     assert r["jump_feet_grounded"].weight == 2.0
 
-    # 5. Anti-spin penalty: heavily penalize yaw angular velocity (ω_z²)
+    # 5. Head posture penalty: locks servos 5–8 to eliminate head bobbing
+    assert "head_posture" in r
+    assert r["head_posture"].weight == -2.0
+
+    # 6. Anti-spin penalty: heavily penalize yaw angular velocity (ω_z²)
     assert "jump_yaw_rate" in r
     assert r["jump_yaw_rate"].weight == -3.0
 
-    # 6. In-place constraints: strictly penalize horizontal velocity and drift
+    # 7. In-place constraints: strictly penalize horizontal velocity and drift
     assert "jump_horizontal_vel" in r
     assert r["jump_horizontal_vel"].weight == -3.0
     assert "jump_horizontal_drift" in r
     assert r["jump_horizontal_drift"].weight == -4.0
 
-    # 7. Verticality penalty: keep body vertical (gx² + gy²)
+    # 8. Verticality penalty: keep body vertical (gx² + gy²)
     assert "jump_verticality" in r
     assert r["jump_verticality"].weight == -3.0
 
-    # 8. Regularizers: low attempt tax on action rate
+    # 9. Regularizers: low attempt tax on action rate
     assert "action_rate_l2" in r
-    assert r["action_rate_l2"].weight == -0.01
+    assert r["action_rate_l2"].weight == -0.005
 
     # Invariant: No walking tracking rewards
     for unwanted in [
@@ -75,15 +89,21 @@ def test_jump_cfg_rewards():
 
 
 def test_jump_cfg_terminations():
-    """Strict terminations: fell_over (>40° tilt), non_foot_contact, nan_state."""
+    """Strict terminations: fell_over (>20° tilt), non_foot_contact, nan_state."""
     cfg = make_microduck_jump_env_cfg()
     terms = cfg.terminations
 
     assert "fell_over" in terms
-    assert terms["fell_over"].params["limit_angle"] == 0.70
+    assert terms["fell_over"].params["limit_angle"] == 0.35
 
     assert "non_foot_contact" in terms
     assert terms["non_foot_contact"].params["sensor_name"] == "non_foot_ground_contact"
+
+    # Non-foot contact sensor must catch all non-foot geoms
+    sensor_map = {s.name: s for s in cfg.scene.sensors}
+    non_foot_sensor = sensor_map["non_foot_ground_contact"]
+    assert non_foot_sensor.primary.mode == "geom"
+    assert "foot_collision" in non_foot_sensor.primary.pattern
 
     assert "nan_state" in terms
 
@@ -93,7 +113,7 @@ def test_jump_command_is_jump_phase():
     cfg = make_microduck_jump_env_cfg()
     cmd = cfg.commands["twist"]
     assert cmd.class_type is JumpPhaseCommand
-    assert cmd.period == 2.0
+    assert cmd.period == 1.2
 
     # 13D command layout: 4D head + 6D body padding
     for group in ("actor", "critic"):
