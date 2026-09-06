@@ -33,17 +33,18 @@ def test_jump_cfg_rewards_present_and_signs():
     # Takeoff & flight rewards
     assert "jump_takeoff_velocity" in r and r["jump_takeoff_velocity"].weight > 0
     assert "jump_flight_air_time" in r and r["jump_flight_air_time"].weight > 0
-    assert "jump_feet_swing_forward" in r and r["jump_feet_swing_forward"].weight > 0
+    assert "jump_horizontal_vel" in r and r["jump_horizontal_vel"].weight < 0
 
     # Landing & return stand rewards
     assert "jump_two_foot_landing" in r and r["jump_two_foot_landing"].weight > 0
     assert "gentle_landing" in r and r["gentle_landing"].weight > 0  # self-negating (|a_z|)
     assert "jump_return_stand" in r and r["jump_return_stand"].weight > 0
     assert "jump_post_landing_hop" in r and r["jump_post_landing_hop"].weight < 0
+    assert "jump_stillness" in r and r["jump_stillness"].weight < 0
 
     # Orientation & sagittal penalties
     assert "jump_sagittal" in r and r["jump_sagittal"].weight < 0
-    assert "jump_orientation" in r and r["jump_orientation"].weight < 0
+    assert "jump_verticality" in r and r["jump_verticality"].weight < 0
     assert "jump_neck_posture" in r and r["jump_neck_posture"].weight < 0
 
     # Regularizers

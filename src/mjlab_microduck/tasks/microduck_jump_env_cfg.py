@@ -1,31 +1,30 @@
-"""Microduck two-footed forward jump task.
+"""Microduck two-footed vertical jump task.
 
 Episodic policy: the robot starts standing at HOME pose, crouches by lowering
 its trunk with knees and hips flexed, performs an explosive two-footed push-off
-launching upward and directly forward, maintains airborne flight while swinging
-its feet forward, lands squarely on two feet with impact damping, and returns
-to a stable vertical stand.
+launching straight upward (in place), maintains airborne flight, lands squarely
+on two feet with impact damping, and returns to a stable vertical stand without
+shuffling or drifting forward.
 
 Key design decisions:
   • Phase-driven cyclic command: command = [cos(2π·phase), sin(2π·phase), 0]
     over a 3.0 s period (randomize_phase=False → starts at phase 0 from stand).
     Provides the MLP actor with unambiguous phase awareness so crouch, takeoff,
     flight, landing, and settle are cleanly separated in time.
+  • In-place vertical motion (no forward shuffle):
+    - Takeoff rewards upward velocity vz, with no forward push target.
+    - Horizontal linear velocity (vx² + vy²) is strictly penalized across all phases.
+    - Body tilt is strictly penalized throughout (vertical body gx ≈ 0, gy ≈ 0).
+    - Post-landing stillness penalty damps residual motion to stick the landing.
   • Air-time gated landing: landing rewards and the post-jump standing annuity
     are multiplied by a continuous smoothstep flight gate (jump_flight_gate).
     If the robot never achieves a minimum airborne duration (>= 80 ms), the
     landing annuity pays zero — grounding/walking/shuffling cannot farm the goal.
   • Single large jump (anti-skipping / anti-double-jump):
     - Crouch phase requires feet grounded (lifting feet is penalized).
-    - Takeoff window demands high forward (vx) and upward (vz) impulse.
     - Post-landing stand phase strictly penalizes foot lifting (anti-hop penalty).
-  • Posture and orientation:
-    - Initial crouch and takeoff require strict vertical alignment (gx ≈ 0, gy ≈ 0).
-    - Flight and landing allow a slight forward pitch lean (up to ~20°), while
-      lateral roll (gy) is strictly taxed throughout.
-    - Settle phase returns the robot to vertical stand at STAND_Z = 0.115 m.
   • Sagittal symmetry: Bilateral mirror-loss (PpoWithSymmetryCfg) keeps left
-    and right legs coordinated for a straight forward jump without veer.
+    and right legs coordinated for a straight symmetric jump.
   • Obs layout: Unified 61D actor layout (48 proprio + 13 command slots) for
     seamless runtime hot-swapping.
 """
@@ -180,22 +179,20 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 2. Explosive takeoff: upward velocity vz and forward velocity vx
+    # 2. Explosive takeoff: upward velocity vz (pure vertical jump, no forward push)
     cfg.rewards["jump_takeoff_velocity"] = RewardTermCfg(
         func=microduck_mdp.jump_takeoff_velocity,
         weight=6.0,
         params={
             "target_vz": 1.0,
             "std_vz": 0.35,
-            "target_vx": 0.8,
-            "std_vx": 0.35,
             "takeoff_start": 0.30,
             "takeoff_end": 0.48,
             "command_name": "twist",
         },
     )
 
-    # 3. Airborne flight: both feet in air with forward momentum
+    # 3. Airborne flight: both feet in air (jumping in place)
     cfg.rewards["jump_flight_air_time"] = RewardTermCfg(
         func=microduck_mdp.jump_flight_air_time,
         weight=5.0,
@@ -208,18 +205,10 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 4. Feet swing forward in flight: prepare feet ahead for landing
-    cfg.rewards["jump_feet_swing_forward"] = RewardTermCfg(
-        func=microduck_mdp.jump_feet_swing_forward,
-        weight=2.0,
-        params={
-            "target_left_hip_pitch": -0.75,
-            "target_right_hip_pitch": 0.75,
-            "std": 0.30,
-            "flight_start": 0.42,
-            "flight_end": 0.62,
-            "command_name": "twist",
-        },
+    # 4. Anti-shuffle / in-place constraint: strictly penalize any horizontal velocity (vx² + vy²)
+    cfg.rewards["jump_horizontal_vel"] = RewardTermCfg(
+        func=microduck_mdp.jump_horizontal_velocity_penalty,
+        weight=-2.0,
     )
 
     # 5. Flight-gated landing on two feet
@@ -269,20 +258,30 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 9. Orientation and straightness penalties
+    # 9. Post-landing stillness penalty: damp out residual motion once landed to stick the landing
+    cfg.rewards["jump_stillness"] = RewardTermCfg(
+        func=microduck_mdp.jump_post_landing_stillness_penalty,
+        weight=-1.5,
+        params={
+            "stand_start": 0.72,
+            "stand_end": 1.00,
+            "command_name": "twist",
+            "sensor_name": feet_ground_cfg.name,
+        },
+    )
+
+    # 10. Orientation and straightness penalties (strictly vertical throughout)
     cfg.rewards["jump_sagittal"] = RewardTermCfg(
         func=microduck_mdp.jump_sagittal_penalty,
         weight=-0.5,
     )
-    cfg.rewards["jump_orientation"] = RewardTermCfg(
-        func=microduck_mdp.jump_orientation_by_phase,
-        weight=-1.5,
-        params={"command_name": "twist"},
+    cfg.rewards["jump_verticality"] = RewardTermCfg(
+        func=microduck_mdp.jump_verticality_penalty,
+        weight=-2.0,
     )
     cfg.rewards["jump_neck_posture"] = RewardTermCfg(
         func=microduck_mdp.jump_neck_posture_penalty,
         weight=-0.5,
-        params={"command_name": "twist"},
     )
 
     # ── Sim2real regularisers ─────────────────────────────────────────────────

@@ -7420,22 +7420,18 @@ def jump_takeoff_velocity(
     env: ManagerBasedRlEnv,
     target_vz: float = 1.0,
     std_vz: float = 0.35,
-    target_vx: float = 0.8,
-    std_vx: float = 0.35,
     takeoff_start: float = 0.30,
     takeoff_end: float = 0.48,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards explosive upward (vz) and forward (vx) velocity during takeoff."""
+    """Rewards explosive upward (vz) velocity during takeoff for a vertical jump."""
     asset: Entity = env.scene[asset_cfg.name]
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, takeoff_start, takeoff_end)
     v_b = asset.data.root_link_lin_vel_b
     score_vz = torch.exp(-((v_b[:, 2] - target_vz) / std_vz).pow(2))
-    score_vx = torch.exp(-((v_b[:, 0] - target_vx) / std_vx).pow(2))
-    # Reward product so high velocity along both axes is required
-    return window * score_vz * score_vx
+    return window * score_vz
 
 
 def jump_flight_air_time(
@@ -7447,9 +7443,8 @@ def jump_flight_air_time(
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards simultaneous airborne duration of both feet while moving forward."""
+    """Rewards simultaneous airborne duration of both feet (jumping in place)."""
     _update_jump_state(env, sensor_name)
-    asset: Entity = env.scene[asset_cfg.name]
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, flight_start, flight_end)
 
@@ -7459,32 +7454,20 @@ def jump_flight_air_time(
         return torch.zeros(env.num_envs, device=env.device)
     sim_air = torch.minimum(cat[:, 0], cat[:, 1])
     air_score = torch.clamp(sim_air / max(target_air_time, 1e-5), 0.0, 1.0)
-    fwd_vel = torch.clamp(asset.data.root_link_lin_vel_b[:, 0] / 0.5, 0.0, 1.0)
-    return window * air_score * fwd_vel
+    return window * air_score
 
 
-def jump_feet_swing_forward(
+def jump_horizontal_velocity_penalty(
     env: ManagerBasedRlEnv,
-    target_left_hip_pitch: float = -0.75,
-    target_right_hip_pitch: float = 0.75,
-    std: float = 0.3,
-    flight_start: float = 0.42,
-    flight_end: float = 0.62,
-    command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards flexing hip pitch forward in flight to position feet ahead for landing."""
+    """Penalizes horizontal velocity (vx² + vy²) to prevent forward shuffle / drift.
+
+    Positive quantity; use negative weight.
+    """
     asset: Entity = env.scene[asset_cfg.name]
-    phase = jump_phase_from_command(env, command_name)
-    window = _jump_phase_window(phase, flight_start, flight_end)
-    servo_pos = _servo_joint_pos(env, asset)
-    # 2: left_hip_pitch, 11: right_hip_pitch
-    l_hp = servo_pos[:, 2]
-    r_hp = servo_pos[:, 11]
-    err_l = (l_hp - target_left_hip_pitch).pow(2)
-    err_r = (r_hp - target_right_hip_pitch).pow(2)
-    score = torch.exp(-0.5 * (err_l + err_r) / (std * std))
-    return window * score
+    v_xy = asset.data.root_link_lin_vel_b[:, :2]
+    return torch.nan_to_num(v_xy.pow(2).sum(dim=-1), nan=0.0)
 
 
 def jump_two_foot_landing(
@@ -7574,13 +7557,35 @@ def jump_post_landing_hop_penalty(
     return gate * window * feet_lifted
 
 
+def jump_post_landing_stillness_penalty(
+    env: ManagerBasedRlEnv,
+    stand_start: float = 0.72,
+    stand_end: float = 1.00,
+    command_name: str = "twist",
+    sensor_name: str = "feet_ground_contact",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes residual linear and angular motion once landed to stick the landing without shuffling.
+
+    Positive quantity; use negative weight.
+    """
+    gate = jump_flight_gate(env, sensor_name=sensor_name)
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, stand_start, stand_end)
+    asset: Entity = env.scene[asset_cfg.name]
+    v_lin = asset.data.root_link_lin_vel_b
+    v_ang = asset.data.root_link_ang_vel_b
+    motion = v_lin.pow(2).sum(dim=-1) + 0.1 * v_ang.pow(2).sum(dim=-1)
+    return gate * window * torch.nan_to_num(motion, nan=0.0)
+
+
 def jump_sagittal_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Penalizes lateral velocity and out-of-sagittal angular velocity (roll & yaw).
 
-    Positive quantity; use negative weight. Keeps jump straight forward.
+    Positive quantity; use negative weight.
     """
     asset: Entity = env.scene[asset_cfg.name]
     vy = asset.data.root_link_lin_vel_b[:, 1]
@@ -7590,36 +7595,17 @@ def jump_sagittal_penalty(
     return torch.nan_to_num(vy.pow(2) + 0.1 * (wx.pow(2) + wz.pow(2)), nan=0.0)
 
 
-def jump_orientation_by_phase(
+def jump_verticality_penalty(
     env: ManagerBasedRlEnv,
-    command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Enforces strict vertical orientation during crouch/takeoff and post-landing stand,
-    while allowing slight forward pitch lean during flight and landing.
+    """Strictly penalizes any body tilt away from vertical (gx² + gy²) across all phases.
 
-    Positive penalty quantity; use negative weight.
+    Positive penalty quantity; use negative weight. Keeps body vertical throughout.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    phase = jump_phase_from_command(env, command_name)
-    grav = asset.data.projected_gravity_b  # [gx, gy, gz]; for upright body [0, 0, -1]
-
-    # Roll (lateral tilt gy) is ALWAYS penalized strictly across all phases
-    roll_penalty = grav[:, 1].pow(2)
-
-    # Pitch (sagittal lean gx):
-    # During crouch (< 0.30) and post-landing (> 0.70): strict verticality gx ≈ 0
-    # During flight/landing (0.30 .. 0.70): forward pitch up to 0.35 (~20 deg) allowed
-    in_flight_window = ((phase >= 0.30) & (phase <= 0.70)).float()
-
-    gx = grav[:, 0]
-    # Allowed range during flight: [0.0, 0.35]. Outside this, penalize excess:
-    pitch_excess_flight = torch.clamp(-gx, min=0.0).pow(2) + torch.clamp(gx - 0.35, min=0.0).pow(2)
-    pitch_excess_strict = gx.pow(2)
-
-    pitch_penalty = torch.lerp(pitch_excess_strict, pitch_excess_flight, in_flight_window)
-
-    return torch.nan_to_num(roll_penalty + pitch_penalty, nan=0.0)
+    grav = asset.data.projected_gravity_b  # [gx, gy, gz]; upright body is [0, 0, -1]
+    return torch.nan_to_num(grav[:, 0].pow(2) + grav[:, 1].pow(2), nan=0.0)
 
 
 def jump_neck_posture_penalty(
@@ -7627,17 +7613,13 @@ def jump_neck_posture_penalty(
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Keeps head and neck vertical during crouch, takeoff, and post-landing settle.
+    """Keeps head and neck vertical throughout the jump.
 
     Positive quantity; use negative weight.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    phase = jump_phase_from_command(env, command_name)
-    # Stricter during crouch (< 0.30) and stand (> 0.70)
-    strict_window = (phase < 0.30) | (phase > 0.70)
     servo_pos = _servo_joint_pos(env, asset)
     default_pos = _servo_default_joint_pos(env, asset)
     # Neck/head joints: 5, 6, 7, 8
     neck_err = (servo_pos[:, 5:9] - default_pos[:, 5:9]).pow(2).mean(dim=-1)
-    weight = torch.where(strict_window, torch.ones_like(phase), 0.2 * torch.ones_like(phase))
-    return torch.nan_to_num(weight * neck_err, nan=0.0)
+    return torch.nan_to_num(neck_err, nan=0.0)

@@ -1,6 +1,6 @@
-# Microduck Forward Jump (`Mjlab-Jump-Flat-MicroDuck`)
+# Microduck Vertical Jump (`Mjlab-Jump-Flat-MicroDuck`)
 
-A reinforcement learning task teaching Microduck (~800 g, ~25 cm bipedal robot with 14 Dynamixel XL330 servos) to perform a clean, two-footed forward jump with air-time gated landing.
+A reinforcement learning task teaching Microduck (~800 g, ~25 cm bipedal robot with 14 Dynamixel XL330 servos) to perform a clean, two-footed vertical jump straight up in place with air-time gated landing and stable upright standing (no forward shuffle or drift).
 
 ---
 
@@ -15,23 +15,27 @@ The jump is parameterized over a 3.0 s period ($T = 3.0$ s) with phase $\phi \in
    - Symmetrically lowers trunk height to `CROUCH_Z = 0.065 m` by flexing knees and hips.
    - Both feet remain firmly planted on the ground (`jump_crouch_feet_grounded`).
    - Anti-pre-hop penalty (`jump_crouch_feet_lift`) prevents premature skipping.
-3. **Explosive Takeoff ($\phi \in [0.30, 0.48]$ | $t \in [0.9, 1.4]\text{ s}$)**:
-   - Demands rapid upward velocity ($v_z \approx 1.0\text{ m/s}$) and forward velocity ($v_x \approx 0.8\text{ m/s}$).
+3. **Explosive Vertical Takeoff ($\phi \in [0.30, 0.48]$ | $t \in [0.9, 1.4]\text{ s}$)**:
+   - Demands rapid vertical upward velocity ($v_z \approx 1.0\text{ m/s}$) straight up.
+   - Horizontal velocity penalty (`jump_horizontal_velocity_penalty`) strictly taxes any horizontal movement ($v_x^2 + v_y^2$).
+   - Body verticality penalty (`jump_verticality_penalty`) prevents forward pitch lean or lateral roll ($g_x^2 + g_y^2$).
    - Both feet push off simultaneously.
-4. **Airborne Flight & Feet Swing ($\phi \in [0.35, 0.65]$ | $t \in [1.0, 1.9]\text{ s}$)**:
+4. **Airborne Flight ($\phi \in [0.35, 0.65]$ | $t \in [1.0, 1.9]\text{ s}$)**:
    - Both feet airborne simultaneously (`torch.minimum(air_l, air_r)`).
-   - Flexes hip pitch forward (`jump_feet_swing_forward`) to swing feet forward under/in front of the CoM in preparation for touchdown.
-   - Controlled forward pitch lean ($\sim 0\text{--}20^\circ$) is permitted; lateral roll ($g_y$) is strictly penalized.
-5. **Two-Footed Landing ($\phi \in [0.58, 0.78]$ | $t \in [1.7, 2.3]\text{ s}$)**:
+   - Body remains vertical in the air without pitching forward.
+5. **Two-Footed Landing in Place ($\phi \in [0.58, 0.78]$ | $t \in [1.7, 2.3]\text{ s}$)**:
    - **Air-time gated**: Landing annuity is multiplied by `jump_flight_gate`. If the robot never achieves $\ge 80\text{ ms}$ continuous flight, landing pays **zero**.
-   - Both feet touch down simultaneously with vertical shock absorption ($|a_z|$ penalty).
-6. **Return to Vertical Stand ($\phi \in [0.72, 1.00]$ | $t \in [2.1, 3.0]\text{ s}$)**:
+   - Both feet touch down simultaneously in place with vertical shock absorption ($|a_z|$ penalty).
+6. **Return to Vertical Stand & Stillness ($\phi \in [0.72, 1.00]$ | $t \in [2.1, 3.0]\text{ s}$)**:
    - Recovers trunk to `STAND_Z = 0.115 m`, body and head upright, HOME joint pose.
-   - Post-landing hop penalty (`jump_post_landing_hop`) strictly taxes lifting feet after landing, preventing double-jumping or skipping.
+   - Stillness penalty (`jump_post_landing_stillness_penalty`) damps linear and angular velocity once landed to prevent shuffling, walking forward, or toppling.
+   - Post-landing hop penalty (`jump_post_landing_hop`) strictly taxes lifting feet after landing.
 
 ---
 
-## 2. Linux Machine (with NVIDIA GPU) Workflow
+## 2. Standard Workflow (Consistent with Repo README)
+
+All commands use the standard tooling documented in `README.md` and `AGENTS.md`.
 
 ### Step 1: Synchronize Dependencies
 ```bash
@@ -39,68 +43,74 @@ uv sync
 ```
 *(On `linux-aarch64` / DGX Spark, uv automatically routes PyPI's CPU wheel to the cu129 index as pinned in `pyproject.toml`).*
 
-### Step 2: Run the 5-Iteration Smoke Test First
-Always run a quick smoke test before launching long runs:
+### Step 2: Smoke Test First (5 Iterations)
+Always run a quick smoke test before launching long runs to verify config and shapes:
 ```bash
-uv run python scripts/train_jump.py --smoke-test
-# or directly:
 uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_iterations 5
 ```
-*Expected: builds scenes, steps without NaNs, confirms 61D observation shape, and exits with code 0.*
+*Expected: builds scenes, steps without NaNs, confirms 61D observation shape, and exits cleanly.*
 
-### Step 3: Launch Full Training
+### Step 3: Train the Jump Policy
 ```bash
-uv run python scripts/train_jump.py --train
-# or directly:
-uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 4000
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 ```
-- Logs to weights & biases under project `mjlab_microduck` (`experiment_name="microduck_jump"`).
-- Checkpoints are saved every 250 iterations to `logs/microduck_jump/<run_id>/`.
-- If training on Hugging Face Jobs, simply append `--hf-jobs`:
+- Or train with an explicit iteration count:
   ```bash
-  uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 4000 --hf-jobs
+  uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 4000
   ```
+- If running on Hugging Face Jobs, simply add `--hf-jobs`:
+  ```bash
+  uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --hf-jobs
+  ```
+- Logs to Weights & Biases under project `mjlab_microduck` (`experiment_name="microduck_jump"`).
+- Checkpoints are saved to `logs/microduck_jump/<run_id>/model_XXXX.pt`.
 
-### Step 4: Resume Training (if needed)
+### Step 4: Watch Trained Policy in the Viewer
+Watch the checkpoint in the viewer using mjlab's standard `play` command:
 ```bash
-uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.load_checkpoint logs/microduck_jump/<run_id>/model_XXXX.pt --agent.resume True
+uv run play Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity/project/run_id>
+```
+Or view a local checkpoint directly:
+```bash
+uv run play Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microduck_jump/<run_id>/model_4000.pt
 ```
 
 ### Step 5: Export to ONNX (with Baked Observation Normalizer)
-Once training converges:
+Always export using the repo's exporter (`scripts/export.py`) so the observation normalizer is baked into the ONNX graph:
 ```bash
-uv run python scripts/train_jump.py --export --checkpoint logs/microduck_jump/<run_id>/model_4000.pt --output-onnx microduck_jump.onnx
-# or directly:
-uv run python scripts/export.py Mjlab-Jump-Flat-MicroDuck --checkpoint logs/microduck_jump/<run_id>/model_4000.pt --output microduck_jump.onnx
+uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity/project/run_id>
+```
+Or export from a local checkpoint:
+```bash
+uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microduck_jump/<run_id>/model_4000.pt --onnx-file output.onnx
 ```
 
 ### Step 6: Deployment Rehearsal in MuJoCo Viewer
-Test the exported ONNX policy with BAM M6 actuators in the CPU viewer:
+Rehearse the exported policy in CPU MuJoCo with BAM M6 actuators:
 ```bash
-uv run python scripts/infer_policy.py --jump microduck_jump.onnx --new-cmd-obs
+uv run scripts/infer_policy.py --walking walk.onnx --jump output.onnx --new-cmd-obs
 ```
 - In the viewer:
-  - Press **`J`** to trigger the two-footed forward jump!
-  - Microduck crouches, launches forward, stays airborne, lands on two feet, and returns to standing.
+  - Press **`J`** to trigger the jump!
+  - Microduck crouches, launches straight up, stays airborne, lands on two feet in place, and returns to a steady vertical stand.
 
 ---
 
 ## 3. Monitoring Training in Weights & Biases
 
 Key metrics to watch per iteration:
-- `Episode_Reward/jump_takeoff_velocity`: Should steadily rise as the duck learns explosive extension.
-- `Episode_Reward/jump_flight_air_time`: Tracks air-time progress.
-- `Episode_Reward/jump_two_foot_landing`: Starts paying once flight gate opens.
+- `Episode_Reward/jump_takeoff_velocity`: Should rise steadily as vertical upward velocity reaches ~1.0 m/s.
+- `Episode_Reward/jump_flight_air_time`: Tracks flight air-time progression.
+- `Episode_Reward/jump_two_foot_landing`: Starts paying once flight gate opens ($\ge 80\text{ ms}$ flight achieved).
 - `Episode_Reward/jump_return_stand`: Dominant annuity once full jump sequence succeeds.
-- Every penalty (`Episode_Reward/jump_crouch_feet_lift`, `jump_post_landing_hop`, `jump_sagittal`, `jump_orientation`) must remain **$\le 0$**.
+- Penalties (`jump_horizontal_vel`, `jump_verticality`, `jump_stillness`, `jump_crouch_feet_lift`, `jump_post_landing_hop`) must all remain **$\le 0$**.
 
 ---
 
 ## 4. Key Files
 
-- `src/mjlab_microduck/tasks/mdp.py`: Jump phase command, jump state tracker, flight gate, and reward/penalty functions.
-- `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`: Environment configuration, 61D observation setup, symmetry loss, and curricula.
+- `src/mjlab_microduck/tasks/mdp.py`: Jump phase command, flight gate, takeoff/flight/landing rewards, horizontal/tilt/stillness penalties.
+- `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`: Jump environment config (curricula, 61D obs layout, BAM friction DR).
 - `src/mjlab_microduck/tasks/__init__.py`: Task registration (`Mjlab-Jump-Flat-MicroDuck` and backlash variants).
-- `scripts/train_jump.py`: Convenience CLI runner for smoke tests, training, export, and rehearsal.
 - `scripts/infer_policy.py`: Deployment rehearsal viewer with `--jump` and `J` key shortcut.
-- `tests/test_jump_cfg.py`: Unit test suite ensuring invariants, reward signs, and 61D layout stay intact.
+- `tests/test_jump_cfg.py`: Regression test suite locking in invariants, reward signs, and 61D layout.
