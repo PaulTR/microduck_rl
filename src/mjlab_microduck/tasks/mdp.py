@@ -7186,3 +7186,458 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# =========================================================================== #
+# Microduck Jump Task (two-footed forward jump with air-time gated landing)    #
+# =========================================================================== #
+
+JUMP_PERIOD: float = 3.0
+JUMP_STAND_Z: float = 0.115
+JUMP_CROUCH_Z: float = 0.065
+JUMP_MIN_AIR_TIME: float = 0.08
+JUMP_TARGET_AIR_TIME: float = 0.16
+
+# Phase boundaries (fraction of period [0, 1)):
+# 0.00..0.10: initial stand / settle
+# 0.10..0.32: crouch loading (lowering z, knees bent, feet flat)
+# 0.32..0.48: explosive takeoff (upward vz, forward vx)
+# 0.48..0.62: airborne flight & feet swing forward
+# 0.62..0.75: landing touchdown on two feet (flight-gated)
+# 0.75..1.00: return to vertical stand at STAND_Z (flight-gated, anti-hop)
+
+
+class JumpPhaseCommand(UniformVelocityCommand):
+    """Phase-encoding command for the Microduck forward jump task.
+
+    Replaces the velocity command in the twist slot with cyclic phase:
+        command = [cos(2π·phase), sin(2π·phase), 0]
+
+    Phase progresses linearly from 0 to 1 over ``period`` (default 3.0s).
+    By default ``randomize_phase=False`` so each episode starts from standing
+    at phase 0.
+    """
+
+    PERIOD: float = JUMP_PERIOD
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._jump_phase = torch.zeros(self.num_envs, device=self.device)
+        self._period = float(getattr(cfg, "period", self.PERIOD))
+        self._randomize_phase = bool(getattr(cfg, "randomize_phase", False))
+        self._update_phase_command()
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.vel_command_b
+
+    def _update_phase_command(self) -> None:
+        self.vel_command_b[:, 0] = torch.cos(2 * torch.pi * self._jump_phase)
+        self.vel_command_b[:, 1] = torch.sin(2 * torch.pi * self._jump_phase)
+        self.vel_command_b[:, 2] = 0.0
+
+    def compute(self, dt: float) -> None:
+        self._jump_phase = (self._jump_phase + dt / self._period) % 1.0
+        self._update_phase_command()
+
+    def reset(self, env_ids: torch.Tensor | None) -> dict:
+        if env_ids is not None and len(env_ids) > 0:
+            if self._randomize_phase:
+                self._jump_phase[env_ids] = torch.rand(len(env_ids), device=self.device)
+            else:
+                self._jump_phase[env_ids] = 0.0
+            self._update_phase_command()
+        return {}
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        pass
+
+    def _update_command(self) -> None:
+        pass
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class JumpPhaseCommandCfg(UniformVelocityCommandCfg):
+    class_type: type = JumpPhaseCommand
+    period: float = JUMP_PERIOD
+    randomize_phase: bool = False
+
+    def build(self, env: ManagerBasedRlEnv) -> "JumpPhaseCommand":
+        return JumpPhaseCommand(self, env)
+
+
+def jump_phase_from_command(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    """Extract phase φ ∈ [0, 1) from the twist command slot."""
+    cmd = env.command_manager.get_command(command_name)
+    return (torch.atan2(cmd[:, 1], cmd[:, 0]) / (2 * torch.pi)) % 1.0
+
+
+def _jump_phase_window(
+    phase: torch.Tensor,
+    start: float,
+    end: float,
+    blend: float = 0.04,
+) -> torch.Tensor:
+    """Smooth bell/plateau in [0, 1] over phase range [start, end]."""
+    up = torch.clamp((phase - start) / max(blend, 1e-5), 0.0, 1.0)
+    dn = torch.clamp((end - phase) / max(blend, 1e-5), 0.0, 1.0)
+    w = torch.minimum(up, dn)
+    return w * w * (3.0 - 2.0 * w)
+
+
+def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Ensures jump state tensors exist on env."""
+    if not hasattr(env, "_jump_max_air_time"):
+        env._jump_max_air_time = torch.zeros(env.num_envs, device=env.device)
+        env._jump_has_flown = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+        env._jump_has_landed = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+        env._jump_last_update_step = -1
+    return env._jump_max_air_time, env._jump_has_flown, env._jump_has_landed
+
+
+def _update_jump_state(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    min_air_time: float = JUMP_MIN_AIR_TIME,
+) -> None:
+    """Step-guarded tracker computing simultaneous foot air time and landing latch."""
+    _jump_state(env)
+    step = int(env.common_step_counter)
+    if step != env._jump_last_update_step:
+        if sensor_name in env.scene.sensors:
+            sensor = env.scene.sensors[sensor_name]
+            cat = sensor.data.current_air_time
+            if cat is not None and cat.shape[-1] >= 2:
+                sim_air = torch.minimum(cat[:, 0], cat[:, 1])
+                env._jump_max_air_time = torch.maximum(env._jump_max_air_time, sim_air)
+                env._jump_has_flown = env._jump_has_flown | (env._jump_max_air_time >= min_air_time)
+
+                found = sensor.data.found
+                if found is not None and found.shape[-1] >= 2:
+                    contacts = (found.view(found.shape[0], -1)[:, :2] > 0)
+                    both_feet_down = contacts[:, 0] & contacts[:, 1]
+                    env._jump_has_landed = env._jump_has_landed | (env._jump_has_flown & both_feet_down)
+        env._jump_last_update_step = step
+
+
+def reset_jump_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reset jump state tracking variables on episode reset."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    _jump_state(env)
+    env._jump_max_air_time[env_ids] = 0.0
+    env._jump_has_flown[env_ids] = False
+    env._jump_has_landed[env_ids] = False
+
+
+def jump_flight_gate(
+    env: ManagerBasedRlEnv,
+    min_air_time: float = JUMP_MIN_AIR_TIME,
+    target_air_time: float = JUMP_TARGET_AIR_TIME,
+    sensor_name: str = "feet_ground_contact",
+) -> torch.Tensor:
+    """Smoothstep flight qualification gate: 0 if no flight, 1 once target air time achieved.
+
+    Used to gate all landing and post-landing stand rewards so a grounded policy
+    collects zero landing annuity.
+    """
+    _update_jump_state(env, sensor_name, min_air_time)
+    t = torch.clamp(
+        (env._jump_max_air_time - min_air_time) / max(target_air_time - min_air_time, 1e-6),
+        0.0,
+        1.0,
+    )
+    return t * t * (3.0 - 2.0 * t)
+
+
+def jump_crouch_height(
+    env: ManagerBasedRlEnv,
+    target_height: float = JUMP_CROUCH_Z,
+    std: float = 0.02,
+    crouch_start: float = 0.10,
+    crouch_end: float = 0.32,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Rewards lowering trunk height to CROUCH_Z during the crouch loading phase."""
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, crouch_start, crouch_end)
+    z = asset.data.root_link_pos_w[:, 2]
+    score = torch.exp(-((z - target_height) / std).pow(2))
+    return window * score
+
+
+def jump_crouch_feet_grounded(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    crouch_start: float = 0.00,
+    crouch_end: float = 0.30,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """Rewards keeping both feet firmly grounded during initial stand and crouch."""
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, crouch_start, crouch_end)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None or found.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    contacts = found.view(found.shape[0], -1)[:, :2] > 0
+    both_feet_down = (contacts[:, 0] & contacts[:, 1]).float()
+    return window * both_feet_down
+
+
+def jump_crouch_feet_lift_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    crouch_start: float = 0.00,
+    crouch_end: float = 0.30,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """Penalizes lifting either foot during the crouch preparation (anti-pre-hop).
+
+    Positive quantity; use negative weight.
+    """
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, crouch_start, crouch_end)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None or found.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    contacts = found.view(found.shape[0], -1)[:, :2] > 0
+    feet_lifted = (~contacts[:, 0] | ~contacts[:, 1]).float()
+    return window * feet_lifted
+
+
+def jump_takeoff_velocity(
+    env: ManagerBasedRlEnv,
+    target_vz: float = 1.0,
+    std_vz: float = 0.35,
+    target_vx: float = 0.8,
+    std_vx: float = 0.35,
+    takeoff_start: float = 0.30,
+    takeoff_end: float = 0.48,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Rewards explosive upward (vz) and forward (vx) velocity during takeoff."""
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, takeoff_start, takeoff_end)
+    v_b = asset.data.root_link_lin_vel_b
+    score_vz = torch.exp(-((v_b[:, 2] - target_vz) / std_vz).pow(2))
+    score_vx = torch.exp(-((v_b[:, 0] - target_vx) / std_vx).pow(2))
+    # Reward product so high velocity along both axes is required
+    return window * score_vz * score_vx
+
+
+def jump_flight_air_time(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    target_air_time: float = JUMP_TARGET_AIR_TIME,
+    flight_start: float = 0.35,
+    flight_end: float = 0.65,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Rewards simultaneous airborne duration of both feet while moving forward."""
+    _update_jump_state(env, sensor_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, flight_start, flight_end)
+
+    sensor = env.scene.sensors[sensor_name]
+    cat = sensor.data.current_air_time
+    if cat is None or cat.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    sim_air = torch.minimum(cat[:, 0], cat[:, 1])
+    air_score = torch.clamp(sim_air / max(target_air_time, 1e-5), 0.0, 1.0)
+    fwd_vel = torch.clamp(asset.data.root_link_lin_vel_b[:, 0] / 0.5, 0.0, 1.0)
+    return window * air_score * fwd_vel
+
+
+def jump_feet_swing_forward(
+    env: ManagerBasedRlEnv,
+    target_left_hip_pitch: float = -0.75,
+    target_right_hip_pitch: float = 0.75,
+    std: float = 0.3,
+    flight_start: float = 0.42,
+    flight_end: float = 0.62,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Rewards flexing hip pitch forward in flight to position feet ahead for landing."""
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, flight_start, flight_end)
+    servo_pos = _servo_joint_pos(env, asset)
+    # 2: left_hip_pitch, 11: right_hip_pitch
+    l_hp = servo_pos[:, 2]
+    r_hp = servo_pos[:, 11]
+    err_l = (l_hp - target_left_hip_pitch).pow(2)
+    err_r = (r_hp - target_right_hip_pitch).pow(2)
+    score = torch.exp(-0.5 * (err_l + err_r) / (std * std))
+    return window * score
+
+
+def jump_two_foot_landing(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    landing_start: float = 0.58,
+    landing_end: float = 0.78,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Flight-gated reward for simultaneous touchdown of both feet during landing."""
+    gate = jump_flight_gate(env, sensor_name=sensor_name)
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, landing_start, landing_end)
+
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None or found.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    contacts = found.view(found.shape[0], -1)[:, :2] > 0
+    both_feet_down = (contacts[:, 0] & contacts[:, 1]).float()
+
+    asset: Entity = env.scene[asset_cfg.name]
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    upright = torch.exp(-tilt_sq / 0.16)
+
+    return gate * window * both_feet_down * upright
+
+
+def jump_return_stand_composite(
+    env: ManagerBasedRlEnv,
+    target_height: float = JUMP_STAND_Z,
+    height_std: float = 0.03,
+    upright_std: float = 0.35,
+    pose_std: float = 0.35,
+    stand_start: float = 0.72,
+    stand_end: float = 1.00,
+    sensor_name: str = "feet_ground_contact",
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Flight-gated standing composite annuity once landed at HOME stand."""
+    gate = jump_flight_gate(env, sensor_name=sensor_name)
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, stand_start, stand_end)
+
+    asset: Entity = env.scene[asset_cfg.name]
+    z = asset.data.root_link_pos_w[:, 2]
+    h_score = torch.exp(-((z - target_height) / height_std).pow(2))
+
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    u_score = torch.exp(-tilt_sq / (upright_std * upright_std))
+
+    joint_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    # Leg joints
+    leg_ids = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
+    p_score = torch.exp(-((joint_pos[:, leg_ids] - default_pos[:, leg_ids]) / pose_std).pow(2)).mean(dim=-1)
+
+    return gate * window * (h_score * u_score * p_score)
+
+
+def jump_post_landing_hop_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    stand_start: float = 0.72,
+    stand_end: float = 1.00,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """Penalizes lifting either foot during the standing settle phase (anti-double-jump/anti-skip).
+
+    Positive quantity; use negative weight.
+    """
+    gate = jump_flight_gate(env, sensor_name=sensor_name)
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, stand_start, stand_end)
+
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None or found.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    contacts = found.view(found.shape[0], -1)[:, :2] > 0
+    feet_lifted = (~contacts[:, 0] | ~contacts[:, 1]).float()
+
+    return gate * window * feet_lifted
+
+
+def jump_sagittal_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes lateral velocity and out-of-sagittal angular velocity (roll & yaw).
+
+    Positive quantity; use negative weight. Keeps jump straight forward.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    vy = asset.data.root_link_lin_vel_b[:, 1]
+    omega_b = asset.data.root_link_ang_vel_b
+    wx = omega_b[:, 0]
+    wz = omega_b[:, 2]
+    return torch.nan_to_num(vy.pow(2) + 0.1 * (wx.pow(2) + wz.pow(2)), nan=0.0)
+
+
+def jump_orientation_by_phase(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Enforces strict vertical orientation during crouch/takeoff and post-landing stand,
+    while allowing slight forward pitch lean during flight and landing.
+
+    Positive penalty quantity; use negative weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = jump_phase_from_command(env, command_name)
+    grav = asset.data.projected_gravity_b  # [gx, gy, gz]; for upright body [0, 0, -1]
+
+    # Roll (lateral tilt gy) is ALWAYS penalized strictly across all phases
+    roll_penalty = grav[:, 1].pow(2)
+
+    # Pitch (sagittal lean gx):
+    # During crouch (< 0.30) and post-landing (> 0.70): strict verticality gx ≈ 0
+    # During flight/landing (0.30 .. 0.70): forward pitch up to 0.35 (~20 deg) allowed
+    in_flight_window = ((phase >= 0.30) & (phase <= 0.70)).float()
+
+    gx = grav[:, 0]
+    # Allowed range during flight: [0.0, 0.35]. Outside this, penalize excess:
+    pitch_excess_flight = torch.clamp(-gx, min=0.0).pow(2) + torch.clamp(gx - 0.35, min=0.0).pow(2)
+    pitch_excess_strict = gx.pow(2)
+
+    pitch_penalty = torch.lerp(pitch_excess_strict, pitch_excess_flight, in_flight_window)
+
+    return torch.nan_to_num(roll_penalty + pitch_penalty, nan=0.0)
+
+
+def jump_neck_posture_penalty(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Keeps head and neck vertical during crouch, takeoff, and post-landing settle.
+
+    Positive quantity; use negative weight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    phase = jump_phase_from_command(env, command_name)
+    # Stricter during crouch (< 0.30) and stand (> 0.70)
+    strict_window = (phase < 0.30) | (phase > 0.70)
+    servo_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    # Neck/head joints: 5, 6, 7, 8
+    neck_err = (servo_pos[:, 5:9] - default_pos[:, 5:9]).pow(2).mean(dim=-1)
+    weight = torch.where(strict_window, torch.ones_like(phase), 0.2 * torch.ones_like(phase))
+    return torch.nan_to_num(weight * neck_err, nan=0.0)
