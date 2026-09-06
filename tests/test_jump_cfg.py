@@ -99,13 +99,24 @@ def test_jump_cfg_terminations():
     assert "non_foot_contact" in terms
     assert terms["non_foot_contact"].params["sensor_name"] == "non_foot_ground_contact"
 
-    # Non-foot contact sensor must catch all non-foot geoms
+    # Non-foot contact sensor must catch all non-ankle bodies
     sensor_map = {s.name: s for s in cfg.scene.sensors}
     non_foot_sensor = sensor_map["non_foot_ground_contact"]
-    assert non_foot_sensor.primary.mode == "geom"
-    assert "foot_collision" in non_foot_sensor.primary.pattern
+    assert non_foot_sensor.primary.mode == "body"
+    assert "ankle" in non_foot_sensor.primary.pattern
 
     assert "nan_state" in terms
+
+
+def test_jump_sensors_build_cleanly():
+    """All contact sensors in jump env must compile into MuJoCo MjSpec without name collisions."""
+    import mujoco
+    cfg = make_microduck_jump_env_cfg()
+    entities = {k: v.build() for k, v in cfg.scene.entities.items()}
+    spec = mujoco.MjSpec()
+    for s_cfg in cfg.scene.sensors:
+        sensor = s_cfg.build()
+        sensor.edit_spec(spec, entities)
 
 
 def test_jump_command_is_jump_phase():

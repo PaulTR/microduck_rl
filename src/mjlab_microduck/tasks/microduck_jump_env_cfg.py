@@ -108,8 +108,8 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     non_foot_ground_cfg = ContactSensorCfg(
         name="non_foot_ground_contact",
         primary=ContactMatch(
-            mode="geom",
-            pattern=r"^(?!.*foot_collision).*$",
+            mode="body",
+            pattern=r"^(?!ankle_).*$",
             entity="robot",
         ),
         secondary=ContactMatch(mode="body", pattern="terrain"),
