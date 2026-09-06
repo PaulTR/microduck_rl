@@ -64,6 +64,7 @@ STAND_Z          = 0.115
 CROUCH_Z         = 0.065
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+import mjlab.envs.mdp as base_mdp
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import (
@@ -119,7 +120,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         name="non_foot_ground_contact",
         primary=ContactMatch(
             mode="body",
-            pattern=r"^(trunk_base|.*hip.*|.*knee.*|jaw_soft)$",
+            pattern=r"^(trunk_base|hip_l.*|leg.*|jaw_soft)$",
             entity="robot",
         ),
         secondary=ContactMatch(mode="body", pattern="terrain"),
@@ -218,13 +219,35 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 4. Anti-shuffle / in-place constraint: strictly penalize any horizontal velocity (vx² + vy²)
+    # 4. Anti-shuffle / in-place constraints: strictly lock the robot to (x=0, y=0) in world space
     cfg.rewards["jump_horizontal_vel"] = RewardTermCfg(
         func=microduck_mdp.jump_horizontal_velocity_penalty,
-        weight=-2.0,
+        weight=-4.0,
+    )
+    cfg.rewards["jump_horizontal_drift"] = RewardTermCfg(
+        func=microduck_mdp.jump_horizontal_drift_penalty,
+        weight=-5.0,
+    )
+    cfg.rewards["jump_stay_in_place"] = RewardTermCfg(
+        func=microduck_mdp.jump_stay_in_place,
+        weight=3.0,
+        params={"std": 0.04},
     )
 
-    # 5. Flight-gated landing on two feet in crouch (absorbing impact on feet, no butt landing)
+    # 5. Anti-kickback / leg posture: strictly penalize kicking legs backward behind the body
+    cfg.rewards["jump_hip_pitch_extension"] = RewardTermCfg(
+        func=microduck_mdp.jump_hip_pitch_extension_penalty,
+        weight=-3.0,
+    )
+
+    # 6. Dense upright orientation reward across all phases
+    cfg.rewards["jump_upright"] = RewardTermCfg(
+        func=microduck_mdp.jump_upright,
+        weight=3.0,
+        params={"upright_std": 0.25},
+    )
+
+    # 7. Flight-gated landing on two feet in crouch (absorbing impact on feet, no butt landing)
     cfg.rewards["jump_two_foot_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_two_foot_landing,
         weight=4.0,
@@ -240,21 +263,21 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 6. Non-foot contact penalty: strictly penalizes butt, hip, knee, or head contact with the ground
+    # 8. Non-foot contact penalty: strictly penalizes butt, hip, knee, or head contact with the ground
     cfg.rewards["jump_non_foot_contact"] = RewardTermCfg(
         func=microduck_mdp.jump_non_foot_contact_penalty,
         weight=-5.0,
         params={"sensor_name": non_foot_ground_cfg.name},
     )
 
-    # 7. Gentle landing shock penalty (|a_z|) — self-negating, positive weight
+    # 9. Gentle landing shock penalty (|a_z|) — self-negating, positive weight
     cfg.rewards["gentle_landing"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
         weight=0.002,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
 
-    # 8. Flight-gated return to stand annuity (gated: pays zero if butt touches ground!)
+    # 10. Flight-gated return to stand annuity (gated: pays zero if butt touches ground!)
     cfg.rewards["jump_return_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_return_stand_composite,
         weight=5.0,
@@ -271,7 +294,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 8. Post-landing anti-hop penalty: penalize lifting feet after landing
+    # 11. Post-landing anti-hop penalty: penalize lifting feet after landing
     cfg.rewards["jump_post_landing_hop"] = RewardTermCfg(
         func=microduck_mdp.jump_post_landing_hop_penalty,
         weight=-3.0,
@@ -283,7 +306,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 9. Post-landing stillness penalty: damp out residual motion once landed to stick the landing
+    # 12. Post-landing stillness penalty: damp out residual motion once landed to stick the landing
     cfg.rewards["jump_stillness"] = RewardTermCfg(
         func=microduck_mdp.jump_post_landing_stillness_penalty,
         weight=-1.5,
@@ -295,14 +318,14 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 10. Orientation and straightness penalties (strictly vertical throughout)
+    # 13. Orientation and straightness penalties (strictly vertical throughout)
     cfg.rewards["jump_sagittal"] = RewardTermCfg(
         func=microduck_mdp.jump_sagittal_penalty,
         weight=-0.5,
     )
     cfg.rewards["jump_verticality"] = RewardTermCfg(
         func=microduck_mdp.jump_verticality_penalty,
-        weight=-2.0,
+        weight=-4.0,
     )
     cfg.rewards["jump_neck_posture"] = RewardTermCfg(
         func=microduck_mdp.jump_neck_posture_penalty,
@@ -404,8 +427,17 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     )
 
     # ── Terminations ──────────────────────────────────────────────────────────
-    if "fell_over" in cfg.terminations:
-        del cfg.terminations["fell_over"]
+    cfg.terminations["fell_over"] = TerminationTermCfg(
+        func=base_mdp.bad_orientation,
+        params={
+            "limit_angle": 0.65,  # ~37 deg tilt limit — terminates instantly on pitch dives or falls
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    cfg.terminations["non_foot_contact"] = TerminationTermCfg(
+        func=microduck_mdp.non_foot_ground_contact_termination,
+        params={"sensor_name": non_foot_ground_cfg.name},
+    )
     cfg.terminations["nan_state"] = TerminationTermCfg(
         func=microduck_mdp.robot_state_is_nan,
         time_out=False,

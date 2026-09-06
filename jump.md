@@ -12,24 +12,25 @@ The jump is parameterized over a 3.0 s period ($T = 3.0$ s) with phase $\phi \in
    - Starts standing at nominal height (`STAND_Z = 0.115 m`) in the `HOME` joint pose.
    - Body and head strictly vertical ($g_x \approx 0, g_y \approx 0$).
 2. **Crouch Loading ($\phi \in [0.10, 0.32]$ | $t \in [0.3, 1.0]\text{ s}$)**:
-   - Symmetrically lowers trunk height to `CROUCH_Z = 0.065 m` by flexing knees and hips.
+   - Symmetrically lowers trunk height to `CROUCH_Z = 0.065 m` by flexing knees and hips directly beneath the torso.
    - Both feet remain firmly planted on the ground (`jump_crouch_feet_grounded`).
    - Anti-pre-hop penalty (`jump_crouch_feet_lift`) prevents premature skipping.
 3. **Explosive Vertical Takeoff ($\phi \in [0.30, 0.48]$ | $t \in [0.9, 1.4]\text{ s}$)**:
-   - Demands rapid vertical upward velocity ($v_z \approx 1.0\text{ m/s}$) straight up.
-   - Horizontal velocity penalty (`jump_horizontal_velocity_penalty`) strictly taxes horizontal movement ($v_x^2 + v_y^2$).
-   - Body verticality penalty (`jump_verticality_penalty`) prevents pitch lean or lateral roll ($g_x^2 + g_y^2$).
+   - Demands rapid vertical upward velocity ($v_z \approx 1.0\text{ m/s}$) straight up in **world frame** ($+z_w$).
+   - **Zero Forward/Horizontal Translation**: Strictly locked in place at $(x=0, y=0)$ via `jump_stay_in_place` reward and `jump_horizontal_drift` penalty.
+   - **Anti-Kickback Constraint**: `jump_hip_pitch_extension_penalty` prevents extending hips backward (kicking legs behind the torso), eliminating the forward rotational torque that causes pitch dives.
+   - Body verticality penalty (`jump_verticality_penalty`, weight -4.0) prevents pitch lean or lateral roll ($g_x^2 + g_y^2$).
    - Both feet push off simultaneously.
 4. **Airborne Flight ($\phi \in [0.35, 0.65]$ | $t \in [1.0, 1.9]\text{ s}$)**:
    - Both feet airborne simultaneously (`torch.minimum(air_l, air_r)`).
    - Flight qualification gate (`jump_flight_gate`) unlocks landing rewards only once $\ge 80\text{ ms}$ continuous air time is achieved.
 5. **Two-Footed Landing in Crouch ($\phi \in [0.55, 0.75]$ | $t \in [1.65, 2.25]\text{ s}$)**:
    - **Crouch Shock Absorption on Feet**: Rewards landing in the crouched position (`CROUCH_Z = 0.065 m`) with both feet flat on the ground and trunk upright.
-   - **Anti-Butt Contact Gate**: Landing reward requires **zero** non-foot ground contact (`non_foot_ground_contact`). If the butt, hips, knees, or head touch the floor, landing pays **zero**.
-   - **Non-Foot Contact Penalty**: Explicit penalty (`jump_non_foot_contact`, weight -5.0) taxing any butt/hip/knee ground strike.
+   - **Strict Non-Foot Ground Contact Termination**: If head/beak, butt/battery, hips, or knees touch the ground at ANY point, the episode **terminates instantly** (`non_foot_contact` termination). Falling on the face or butt and standing back up is physically impossible because the episode immediately ends!
+   - **Tilt Fall Termination**: If trunk tilts $> 37^\circ$ (`fell_over` termination with `limit_angle=0.65`), the episode terminates immediately.
 6. **Return to Vertical Stand & Stillness ($\phi \in [0.72, 1.00]$ | $t \in [2.16, 3.0]\text{ s}$)**:
    - Recovers trunk from crouch to `STAND_Z = 0.115 m`, body and head upright, HOME joint pose.
-   - **Butt-Contact Lockout**: Gated on having achieved clean flight AND clean landing on feet without touching the ground with the butt. If the robot sat on its butt, standing up from sitting pays **zero**.
+   - **Clean-Landing Gate**: Only pays if the robot completed flight and landed on its feet without falling.
    - Stillness penalty (`jump_post_landing_stillness_penalty`) damps linear and angular velocity once landed to prevent shuffling.
    - Post-landing hop penalty (`jump_post_landing_hop`) strictly taxes lifting feet after landing.
 

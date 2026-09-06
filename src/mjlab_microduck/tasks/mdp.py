@@ -7441,12 +7441,16 @@ def jump_takeoff_velocity(
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards explosive upward (vz) velocity during takeoff for a vertical jump."""
+    """Rewards explosive upward (vz) velocity in the WORLD frame during takeoff.
+
+    Critically uses root_link_lin_vel_w[:, 2] (world-frame z) so pitching forward
+    and diving does NOT register as upward velocity.
+    """
     asset: Entity = env.scene[asset_cfg.name]
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, takeoff_start, takeoff_end)
-    v_b = asset.data.root_link_lin_vel_b
-    score_vz = torch.exp(-((v_b[:, 2] - target_vz) / std_vz).pow(2))
+    v_w = asset.data.root_link_lin_vel_w
+    score_vz = torch.exp(-((v_w[:, 2] - target_vz) / std_vz).pow(2))
     return window * score_vz
 
 
@@ -7477,13 +7481,82 @@ def jump_horizontal_velocity_penalty(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Penalizes horizontal velocity (vx² + vy²) to prevent forward shuffle / drift.
+    """Penalizes horizontal velocity (vx² + vy²) in the WORLD frame.
 
-    Positive quantity; use negative weight.
+    Positive quantity; use negative weight. Strictly penalizes forward / lateral speed.
     """
     asset: Entity = env.scene[asset_cfg.name]
-    v_xy = asset.data.root_link_lin_vel_b[:, :2]
-    return torch.nan_to_num(v_xy.pow(2).sum(dim=-1), nan=0.0)
+    v_w = asset.data.root_link_lin_vel_w
+    horiz_speed_sq = v_w[:, 0].pow(2) + v_w[:, 1].pow(2)
+    return torch.nan_to_num(horiz_speed_sq, nan=0.0)
+
+
+def jump_horizontal_drift_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes squared horizontal displacement from origin (x_w² + y_w²).
+
+    Positive quantity; use negative weight. Locks the robot to its spawn location.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    pos_w = asset.data.root_link_pos_w - env.scene.terrain.env_origins
+    return torch.nan_to_num(pos_w[:, 0].pow(2) + pos_w[:, 1].pow(2), nan=0.0)
+
+
+def jump_stay_in_place(
+    env: ManagerBasedRlEnv,
+    std: float = 0.04,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense positive reward for keeping the trunk centered at (x=0, y=0) in world coordinates."""
+    asset: Entity = env.scene[asset_cfg.name]
+    pos_w = asset.data.root_link_pos_w - env.scene.terrain.env_origins
+    drift_sq = pos_w[:, 0].pow(2) + pos_w[:, 1].pow(2)
+    return torch.exp(-drift_sq / (std * std))
+
+
+def jump_hip_pitch_extension_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes extending hips backward (kicking legs behind the body).
+
+    Positive quantity; use negative weight. Keeps feet positioned under the trunk.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_pos = _servo_joint_pos(env, asset)
+    # Index 2: left hip pitch (HOME -0.4579, flexed is negative)
+    # Index 11: right hip pitch (HOME +0.4579, flexed is positive)
+    left_ext = torch.clamp(joint_pos[:, 2] - (-0.20), min=0.0)
+    right_ext = torch.clamp(0.20 - joint_pos[:, 11], min=0.0)
+    return torch.nan_to_num(left_ext.pow(2) + right_ext.pow(2), nan=0.0)
+
+
+def jump_upright(
+    env: ManagerBasedRlEnv,
+    upright_std: float = 0.25,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense reward for keeping the trunk strictly upright throughout the jump."""
+    asset: Entity = env.scene[asset_cfg.name]
+    quat = asset.data.root_link_quat_w
+    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    return torch.exp(-tilt_sq / (upright_std * upright_std))
+
+
+def non_foot_ground_contact_termination(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "non_foot_ground_contact",
+) -> torch.Tensor:
+    """Terminates if trunk, hips, legs/knees, or head touch the terrain."""
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None:
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    return (found.view(found.shape[0], -1) > 0).any(dim=-1)
 
 
 def jump_non_foot_contact_penalty(

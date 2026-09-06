@@ -35,6 +35,10 @@ def test_jump_cfg_rewards_present_and_signs():
     assert "jump_takeoff_velocity" in r and r["jump_takeoff_velocity"].weight > 0
     assert "jump_flight_air_time" in r and r["jump_flight_air_time"].weight > 0
     assert "jump_horizontal_vel" in r and r["jump_horizontal_vel"].weight < 0
+    assert "jump_horizontal_drift" in r and r["jump_horizontal_drift"].weight < 0
+    assert "jump_stay_in_place" in r and r["jump_stay_in_place"].weight > 0
+    assert "jump_hip_pitch_extension" in r and r["jump_hip_pitch_extension"].weight < 0
+    assert "jump_upright" in r and r["jump_upright"].weight > 0
 
     # Landing & return stand rewards
     assert "jump_two_foot_landing" in r and r["jump_two_foot_landing"].weight > 0
@@ -56,6 +60,14 @@ def test_jump_cfg_rewards_present_and_signs():
     # Walking-specific terms removed
     for gone in ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance", "pose", "upright"):
         assert gone not in r
+
+
+def test_jump_cfg_terminations():
+    cfg = make_microduck_jump_env_cfg()
+    assert "fell_over" in cfg.terminations
+    assert cfg.terminations["fell_over"].params["limit_angle"] <= 0.70
+    assert "non_foot_contact" in cfg.terminations
+    assert "nan_state" in cfg.terminations
 
 
 def test_jump_cfg_events_wired():
