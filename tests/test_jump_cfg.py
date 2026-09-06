@@ -19,6 +19,7 @@ def test_jump_cfg_contact_sensor_air_time():
     sensors = {s.name: s for s in cfg.scene.sensors}
     assert "feet_ground_contact" in sensors
     assert sensors["feet_ground_contact"].track_air_time is True
+    assert "non_foot_ground_contact" in sensors
 
 
 def test_jump_cfg_rewards_present_and_signs():
@@ -37,6 +38,7 @@ def test_jump_cfg_rewards_present_and_signs():
 
     # Landing & return stand rewards
     assert "jump_two_foot_landing" in r and r["jump_two_foot_landing"].weight > 0
+    assert "jump_non_foot_contact" in r and r["jump_non_foot_contact"].weight < 0
     assert "gentle_landing" in r and r["gentle_landing"].weight > 0  # self-negating (|a_z|)
     assert "jump_return_stand" in r and r["jump_return_stand"].weight > 0
     assert "jump_post_landing_hop" in r and r["jump_post_landing_hop"].weight < 0
@@ -157,3 +159,73 @@ def test_jump_phase_command_stepping():
     assert torch.allclose(cmd._jump_phase, torch.tensor(0.25))
     assert torch.allclose(cmd.command[:, 0], torch.tensor(0.0), atol=1e-5)
     assert torch.allclose(cmd.command[:, 1], torch.tensor(1.0), atol=1e-5)
+
+
+def test_jump_butt_contact_gating():
+    import torch
+
+    class _MockSensor:
+        def __init__(self, found):
+            class _Data:
+                pass
+            self.data = _Data()
+            self.data.found = found
+
+    class _MockRobotData:
+        def __init__(self, num_envs):
+            self.root_link_pos_w = torch.tensor([[0.0, 0.0, 0.065]], dtype=torch.float32).repeat(num_envs, 1)
+            self.root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).repeat(num_envs, 1)
+            self.joint_pos = torch.zeros(num_envs, 14)
+
+    class _MockRobot:
+        def __init__(self, num_envs):
+            self.data = _MockRobotData(num_envs)
+
+    class _MockCmdManager:
+        def get_command(self, name):
+            # Phase 0.65 (landing) -> [cos(2pi*0.65), sin(2pi*0.65), 0]
+            phase = 0.65
+            c = torch.tensor([[math.cos(2 * math.pi * phase), math.sin(2 * math.pi * phase), 0.0]])
+            return c.repeat(2, 1)
+
+    import math
+    class _MockScene:
+        def __init__(self, robot, sensors):
+            self._robot = robot
+            self.sensors = sensors
+
+        def __getitem__(self, key):
+            return self._robot
+
+    class _MockEnv:
+        def __init__(self):
+            self.device = "cpu"
+            self.num_envs = 2
+            self.common_step_counter = 1
+            self.command_manager = _MockCmdManager()
+            self._jump_max_air_time = torch.tensor([0.20, 0.20])
+            self._jump_has_flown = torch.tensor([True, True])
+            self._jump_has_landed = torch.tensor([True, True])
+            self._jump_has_butt_contact = torch.tensor([False, True])  # env 0: clean landing; env 1: butt contact
+            self._jump_last_update_step = 1
+            self.scene = _MockScene(
+                robot=_MockRobot(2),
+                sensors={
+                    "feet_ground_contact": _MockSensor(torch.tensor([[1, 1], [1, 1]])),
+                    "non_foot_ground_contact": _MockSensor(torch.tensor([[0], [1]])),
+                },
+            )
+
+    env = _MockEnv()
+    reward = microduck_mdp.jump_two_foot_landing(
+        env,
+        sensor_name="feet_ground_contact",
+        non_foot_sensor_name="non_foot_ground_contact",
+        landing_start=0.55,
+        landing_end=0.75,
+        crouch_z=0.065,
+    )
+    # Env 0 (clean landing on feet) should earn positive reward
+    assert reward[0] > 0.0
+    # Env 1 (butt contact) must be zeroed out
+    assert reward[1] == 0.0

@@ -115,13 +115,26 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         num_slots=1,
     )
 
+    non_foot_ground_cfg = ContactSensorCfg(
+        name="non_foot_ground_contact",
+        primary=ContactMatch(
+            mode="body",
+            pattern=r"^(trunk_base|.*hip.*|.*knee.*|jaw_soft)$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+
     foot_frictions_geom_names = ("left_foot_collision", "right_foot_collision")
 
     # ── Base config ───────────────────────────────────────────────────────────
     cfg = make_velocity_env_cfg()
 
     cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
-    cfg.scene.sensors  = (feet_ground_cfg, self_collision_cfg)
+    cfg.scene.sensors  = (feet_ground_cfg, self_collision_cfg, non_foot_ground_cfg)
     cfg.viewer.body_name = "trunk_base"
     cfg.episode_length_s = EPISODE_LENGTH_S
 
@@ -211,26 +224,37 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         weight=-2.0,
     )
 
-    # 5. Flight-gated landing on two feet
+    # 5. Flight-gated landing on two feet in crouch (absorbing impact on feet, no butt landing)
     cfg.rewards["jump_two_foot_landing"] = RewardTermCfg(
         func=microduck_mdp.jump_two_foot_landing,
         weight=4.0,
         params={
             "sensor_name": feet_ground_cfg.name,
-            "landing_start": 0.58,
-            "landing_end": 0.78,
+            "non_foot_sensor_name": non_foot_ground_cfg.name,
+            "landing_start": 0.55,
+            "landing_end": 0.75,
+            "crouch_z": CROUCH_Z,
+            "crouch_std": 0.02,
+            "upright_std": 0.35,
             "command_name": "twist",
         },
     )
 
-    # 6. Gentle landing shock penalty (|a_z|) — self-negating, positive weight
+    # 6. Non-foot contact penalty: strictly penalizes butt, hip, knee, or head contact with the ground
+    cfg.rewards["jump_non_foot_contact"] = RewardTermCfg(
+        func=microduck_mdp.jump_non_foot_contact_penalty,
+        weight=-5.0,
+        params={"sensor_name": non_foot_ground_cfg.name},
+    )
+
+    # 7. Gentle landing shock penalty (|a_z|) — self-negating, positive weight
     cfg.rewards["gentle_landing"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
         weight=0.002,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
 
-    # 7. Flight-gated return to stand annuity
+    # 8. Flight-gated return to stand annuity (gated: pays zero if butt touches ground!)
     cfg.rewards["jump_return_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_return_stand_composite,
         weight=5.0,
@@ -242,6 +266,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             "stand_start": 0.72,
             "stand_end": 1.00,
             "sensor_name": feet_ground_cfg.name,
+            "non_foot_sensor_name": non_foot_ground_cfg.name,
             "command_name": "twist",
         },
     )

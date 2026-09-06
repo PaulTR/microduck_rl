@@ -1,6 +1,6 @@
 # Microduck Vertical Jump (`Mjlab-Jump-Flat-MicroDuck`)
 
-A reinforcement learning task teaching Microduck (~800 g, ~25 cm bipedal robot with 14 Dynamixel XL330 servos) to perform a clean, two-footed vertical jump straight up in place with air-time gated landing and stable upright standing (no forward shuffle or drift).
+A reinforcement learning task teaching Microduck (~800 g, ~25 cm bipedal robot with 14 Dynamixel XL330 servos) to perform a clean, two-footed vertical jump straight up in place with air-time gated landing on its feet (in a crouch) and stable upright standing without landing on its butt or shuffling.
 
 ---
 
@@ -17,18 +17,20 @@ The jump is parameterized over a 3.0 s period ($T = 3.0$ s) with phase $\phi \in
    - Anti-pre-hop penalty (`jump_crouch_feet_lift`) prevents premature skipping.
 3. **Explosive Vertical Takeoff ($\phi \in [0.30, 0.48]$ | $t \in [0.9, 1.4]\text{ s}$)**:
    - Demands rapid vertical upward velocity ($v_z \approx 1.0\text{ m/s}$) straight up.
-   - Horizontal velocity penalty (`jump_horizontal_velocity_penalty`) strictly taxes any horizontal movement ($v_x^2 + v_y^2$).
-   - Body verticality penalty (`jump_verticality_penalty`) prevents forward pitch lean or lateral roll ($g_x^2 + g_y^2$).
+   - Horizontal velocity penalty (`jump_horizontal_velocity_penalty`) strictly taxes horizontal movement ($v_x^2 + v_y^2$).
+   - Body verticality penalty (`jump_verticality_penalty`) prevents pitch lean or lateral roll ($g_x^2 + g_y^2$).
    - Both feet push off simultaneously.
 4. **Airborne Flight ($\phi \in [0.35, 0.65]$ | $t \in [1.0, 1.9]\text{ s}$)**:
    - Both feet airborne simultaneously (`torch.minimum(air_l, air_r)`).
-   - Body remains vertical in the air without pitching forward.
-5. **Two-Footed Landing in Place ($\phi \in [0.58, 0.78]$ | $t \in [1.7, 2.3]\text{ s}$)**:
-   - **Air-time gated**: Landing annuity is multiplied by `jump_flight_gate`. If the robot never achieves $\ge 80\text{ ms}$ continuous flight, landing pays **zero**.
-   - Both feet touch down simultaneously in place with vertical shock absorption ($|a_z|$ penalty).
-6. **Return to Vertical Stand & Stillness ($\phi \in [0.72, 1.00]$ | $t \in [2.1, 3.0]\text{ s}$)**:
-   - Recovers trunk to `STAND_Z = 0.115 m`, body and head upright, HOME joint pose.
-   - Stillness penalty (`jump_post_landing_stillness_penalty`) damps linear and angular velocity once landed to prevent shuffling, walking forward, or toppling.
+   - Flight qualification gate (`jump_flight_gate`) unlocks landing rewards only once $\ge 80\text{ ms}$ continuous air time is achieved.
+5. **Two-Footed Landing in Crouch ($\phi \in [0.55, 0.75]$ | $t \in [1.65, 2.25]\text{ s}$)**:
+   - **Crouch Shock Absorption on Feet**: Rewards landing in the crouched position (`CROUCH_Z = 0.065 m`) with both feet flat on the ground and trunk upright.
+   - **Anti-Butt Contact Gate**: Landing reward requires **zero** non-foot ground contact (`non_foot_ground_contact`). If the butt, hips, knees, or head touch the floor, landing pays **zero**.
+   - **Non-Foot Contact Penalty**: Explicit penalty (`jump_non_foot_contact`, weight -5.0) taxing any butt/hip/knee ground strike.
+6. **Return to Vertical Stand & Stillness ($\phi \in [0.72, 1.00]$ | $t \in [2.16, 3.0]\text{ s}$)**:
+   - Recovers trunk from crouch to `STAND_Z = 0.115 m`, body and head upright, HOME joint pose.
+   - **Butt-Contact Lockout**: Gated on having achieved clean flight AND clean landing on feet without touching the ground with the butt. If the robot sat on its butt, standing up from sitting pays **zero**.
+   - Stillness penalty (`jump_post_landing_stillness_penalty`) damps linear and angular velocity once landed to prevent shuffling.
    - Post-landing hop penalty (`jump_post_landing_hop`) strictly taxes lifting feet after landing.
 
 ---
@@ -52,65 +54,64 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_itera
 
 ### Step 3: Train the Jump Policy
 ```bash
-uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
+uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 4000
 ```
-- Or train with an explicit iteration count:
-  ```bash
-  uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 4000
-  ```
 - If running on Hugging Face Jobs, simply add `--hf-jobs`:
   ```bash
-  uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --hf-jobs
+  uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 4000 --hf-jobs
   ```
 - Logs to Weights & Biases under project `mjlab_microduck` (`experiment_name="microduck_jump"`).
 - Checkpoints are saved to `logs/microduck_jump/<run_id>/model_XXXX.pt`.
 
 ### Step 4: Watch Trained Policy in the Viewer
-Watch the checkpoint in the viewer using mjlab's standard `play` command:
+Watch a checkpoint directly in the viewer using mjlab's standard `play` command:
 ```bash
 uv run play Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity/project/run_id>
 ```
 Or view a local checkpoint directly:
 ```bash
-uv run play Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microduck_jump/<run_id>/model_4000.pt
+uv run play Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microduck_jump/<run_id>/model_3999.pt
 ```
 
 ### Step 5: Export to ONNX (with Baked Observation Normalizer)
-Always export using the repo's exporter (`scripts/export.py`) so the observation normalizer is baked into the ONNX graph:
+Export the trained checkpoint using `scripts/export.py`:
 ```bash
 uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity/project/run_id>
 ```
-Or export from a local checkpoint:
+Or export from a local checkpoint file directly:
 ```bash
-uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microduck_jump/<run_id>/model_4000.pt --onnx-file output.onnx
+uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --checkpoint-file logs/microduck_jump/<run_id>/model_3999.pt --onnx-file output.onnx
 ```
 
-### Step 6: Deployment Rehearsal in MuJoCo Viewer
-Rehearse the exported policy in CPU MuJoCo with BAM M6 actuators:
+### Step 6: Standalone Policy Playback in MuJoCo Viewer
+You do not need a `walk.onnx` policy — the jump policy runs completely standalone:
 ```bash
-uv run scripts/infer_policy.py --walking walk.onnx --jump output.onnx --new-cmd-obs
+uv run scripts/infer_policy.py --jump output.onnx --new-cmd-obs
 ```
-- In the viewer:
-  - Press **`J`** to trigger the jump!
-  - Microduck crouches, launches straight up, stays airborne, lands on two feet in place, and returns to a steady vertical stand.
+- **How it works**:
+  - The robot starts standing upright in place (phase 0).
+  - Press **`J`** or **`SPACE`** in the terminal to trigger the jump!
+  - Microduck crouches, launches straight up, stays airborne, lands on two feet in a clean crouch, and recovers to an upright standing posture.
+  - Once finished, it remains standing in place, ready for you to press **`J`** or **`SPACE`** to jump again.
 
 ---
 
 ## 3. Monitoring Training in Weights & Biases
 
 Key metrics to watch per iteration:
-- `Episode_Reward/jump_takeoff_velocity`: Should rise steadily as vertical upward velocity reaches ~1.0 m/s.
-- `Episode_Reward/jump_flight_air_time`: Tracks flight air-time progression.
-- `Episode_Reward/jump_two_foot_landing`: Starts paying once flight gate opens ($\ge 80\text{ ms}$ flight achieved).
-- `Episode_Reward/jump_return_stand`: Dominant annuity once full jump sequence succeeds.
-- Penalties (`jump_horizontal_vel`, `jump_verticality`, `jump_stillness`, `jump_crouch_feet_lift`, `jump_post_landing_hop`) must all remain **$\le 0$**.
+- `Episode_Reward/jump_takeoff_velocity`: Rises as vertical upward velocity reaches ~1.0 m/s.
+- `Episode_Reward/jump_flight_air_time`: Tracks airborne flight progression.
+- `Episode_Reward/jump_two_foot_landing`: Pays for landing on feet in crouch height (`CROUCH_Z = 0.065 m`) without butt contact.
+- `Episode_Reward/jump_return_stand`: Dominant annuity once full jump sequence succeeds without butt contact.
+- `Episode_Reward/jump_non_foot_contact`: Tracks ground contact by trunk/butt/hips. Must remain **$\le 0$** and trend toward 0.
+- All penalties (`jump_horizontal_vel`, `jump_verticality`, `jump_stillness`, `jump_crouch_feet_lift`, `jump_post_landing_hop`) must remain **$\le 0$**.
 
 ---
 
 ## 4. Key Files
 
-- `src/mjlab_microduck/tasks/mdp.py`: Jump phase command, flight gate, takeoff/flight/landing rewards, horizontal/tilt/stillness penalties.
-- `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`: Jump environment config (curricula, 61D obs layout, BAM friction DR).
+- `src/mjlab_microduck/tasks/mdp.py`: Jump phase command, non-foot contact detection, crouch takeoff/landing rewards, and butt-contact lockout.
+- `src/mjlab_microduck/tasks/microduck_jump_env_cfg.py`: Jump environment configuration (`non_foot_ground_contact` sensor, landing crouch rewards, 61D layout).
 - `src/mjlab_microduck/tasks/__init__.py`: Task registration (`Mjlab-Jump-Flat-MicroDuck` and backlash variants).
-- `scripts/infer_policy.py`: Deployment rehearsal viewer with `--jump` and `J` key shortcut.
-- `tests/test_jump_cfg.py`: Regression test suite locking in invariants, reward signs, and 61D layout.
+- `scripts/infer_policy.py`: Deployment rehearsal viewer with standalone `--jump` support and `J` / `SPACE` keys.
+- `tests/test_jump_cfg.py`: Regression test suite locking in invariants, non-foot contact sensors, and reward signs.

@@ -7288,22 +7288,28 @@ def _jump_phase_window(
     return w * w * (3.0 - 2.0 * w)
 
 
-def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _jump_state(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Ensures jump state tensors exist on env."""
     if not hasattr(env, "_jump_max_air_time"):
         env._jump_max_air_time = torch.zeros(env.num_envs, device=env.device)
+    if not hasattr(env, "_jump_has_flown"):
         env._jump_has_flown = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    if not hasattr(env, "_jump_has_landed"):
         env._jump_has_landed = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    if not hasattr(env, "_jump_has_butt_contact"):
+        env._jump_has_butt_contact = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    if not hasattr(env, "_jump_last_update_step"):
         env._jump_last_update_step = -1
-    return env._jump_max_air_time, env._jump_has_flown, env._jump_has_landed
+    return env._jump_max_air_time, env._jump_has_flown, env._jump_has_landed, env._jump_has_butt_contact
 
 
 def _update_jump_state(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
+    non_foot_sensor_name: str = "non_foot_ground_contact",
     min_air_time: float = JUMP_MIN_AIR_TIME,
 ) -> None:
-    """Step-guarded tracker computing simultaneous foot air time and landing latch."""
+    """Step-guarded tracker computing simultaneous foot air time, landing latch, and non-foot contact latch."""
     _jump_state(env)
     step = int(env.common_step_counter)
     if step != env._jump_last_update_step:
@@ -7320,6 +7326,14 @@ def _update_jump_state(
                     contacts = (found.view(found.shape[0], -1)[:, :2] > 0)
                     both_feet_down = contacts[:, 0] & contacts[:, 1]
                     env._jump_has_landed = env._jump_has_landed | (env._jump_has_flown & both_feet_down)
+        
+        if non_foot_sensor_name in env.scene.sensors:
+            nf_sensor = env.scene.sensors[non_foot_sensor_name]
+            nf_found = nf_sensor.data.found
+            if nf_found is not None:
+                has_nf = (nf_found.view(nf_found.shape[0], -1) > 0).any(dim=-1)
+                env._jump_has_butt_contact = env._jump_has_butt_contact | has_nf
+
         env._jump_last_update_step = step
 
 
@@ -7335,6 +7349,7 @@ def reset_jump_state(
     env._jump_max_air_time[env_ids] = 0.0
     env._jump_has_flown[env_ids] = False
     env._jump_has_landed[env_ids] = False
+    env._jump_has_butt_contact[env_ids] = False
 
 
 def jump_flight_gate(
@@ -7342,13 +7357,14 @@ def jump_flight_gate(
     min_air_time: float = JUMP_MIN_AIR_TIME,
     target_air_time: float = JUMP_TARGET_AIR_TIME,
     sensor_name: str = "feet_ground_contact",
+    non_foot_sensor_name: str = "non_foot_ground_contact",
 ) -> torch.Tensor:
     """Smoothstep flight qualification gate: 0 if no flight, 1 once target air time achieved.
 
     Used to gate all landing and post-landing stand rewards so a grounded policy
     collects zero landing annuity.
     """
-    _update_jump_state(env, sensor_name, min_air_time)
+    _update_jump_state(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name, min_air_time=min_air_time)
     t = torch.clamp(
         (env._jump_max_air_time - min_air_time) / max(target_air_time - min_air_time, 1e-6),
         0.0,
@@ -7470,16 +7486,46 @@ def jump_horizontal_velocity_penalty(
     return torch.nan_to_num(v_xy.pow(2).sum(dim=-1), nan=0.0)
 
 
+def jump_non_foot_contact_penalty(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "non_foot_ground_contact",
+) -> torch.Tensor:
+    """Penalizes any contact of trunk, hips, knees, or head with the ground.
+
+    Positive quantity; use negative weight. Strictly penalizes butt-strikes or falling.
+    """
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    return (found.view(found.shape[0], -1) > 0).any(dim=-1).float()
+
+
 def jump_two_foot_landing(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    landing_start: float = 0.58,
-    landing_end: float = 0.78,
+    non_foot_sensor_name: str = "non_foot_ground_contact",
+    landing_start: float = 0.55,
+    landing_end: float = 0.75,
+    crouch_z: float = JUMP_CROUCH_Z,
+    crouch_std: float = 0.02,
+    upright_std: float = 0.35,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Flight-gated reward for simultaneous touchdown of both feet during landing."""
-    gate = jump_flight_gate(env, sensor_name=sensor_name)
+    """Flight-gated reward for landing on two feet in a clean crouch (absorbing impact like launch).
+
+    Must:
+      1. Have achieved continuous flight (flight gate).
+      2. Touch down on both feet simultaneously.
+      3. Lower trunk to crouch height (crouch_z ≈ 0.065 m) to absorb the landing on feet.
+      4. Maintain vertical trunk orientation.
+      5. Zero non-foot contact (butt, trunk, hips, knees must NOT touch the ground).
+    """
+    _update_jump_state(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name)
+    gate = jump_flight_gate(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name)
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, landing_start, landing_end)
 
@@ -7491,11 +7537,17 @@ def jump_two_foot_landing(
     both_feet_down = (contacts[:, 0] & contacts[:, 1]).float()
 
     asset: Entity = env.scene[asset_cfg.name]
+    z = asset.data.root_link_pos_w[:, 2]
+    crouch_score = torch.exp(-((z - crouch_z) / crouch_std).pow(2))
+
     quat = asset.data.root_link_quat_w
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright = torch.exp(-tilt_sq / 0.16)
+    upright = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    return gate * window * both_feet_down * upright
+    # Butt/trunk contact check: if the butt touches the ground, landing earns ZERO
+    no_butt = (~env._jump_has_butt_contact).float()
+
+    return gate * window * both_feet_down * crouch_score * upright * no_butt
 
 
 def jump_return_stand_composite(
@@ -7507,13 +7559,23 @@ def jump_return_stand_composite(
     stand_start: float = 0.72,
     stand_end: float = 1.00,
     sensor_name: str = "feet_ground_contact",
+    non_foot_sensor_name: str = "non_foot_ground_contact",
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Flight-gated standing composite annuity once landed at HOME stand."""
-    gate = jump_flight_gate(env, sensor_name=sensor_name)
+    """Flight-gated standing composite annuity once landed at HOME stand.
+
+    Gated on BOTH having flown AND having achieved a clean landing on feet
+    WITHOUT touching the ground with the butt/hips. Standing up from sitting
+    earns ZERO.
+    """
+    _update_jump_state(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name)
+    gate = jump_flight_gate(env, sensor_name=sensor_name, non_foot_sensor_name=non_foot_sensor_name)
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, stand_start, stand_end)
+
+    # If the robot touched the ground with its butt, return-to-stand pays zero!
+    no_butt = (~env._jump_has_butt_contact).float()
 
     asset: Entity = env.scene[asset_cfg.name]
     z = asset.data.root_link_pos_w[:, 2]
@@ -7529,7 +7591,7 @@ def jump_return_stand_composite(
     leg_ids = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
     p_score = torch.exp(-((joint_pos[:, leg_ids] - default_pos[:, leg_ids]) / pose_std).pow(2)).mean(dim=-1)
 
-    return gate * window * (h_score * u_score * p_score)
+    return gate * window * (h_score * u_score * p_score) * no_butt
 
 
 def jump_post_landing_hop_penalty(

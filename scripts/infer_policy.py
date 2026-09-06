@@ -339,10 +339,10 @@ class PolicyInference:
             print(f"{name} policy input shape: {self.behavior_sessions[name].get_inputs()[0].shape}"
                   f"  (auto-return after {duration:.1f}s)")
 
-        # Validate at least one policy loaded. A sitstand policy can run alone
-        # (it holds the stand at flag=0), unlike the old one-way sit policy.
-        if not self.walking_session and not self.standing_session and not self.is_sitstand:
-            raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
+        # Validate at least one policy loaded. A sitstand policy or jump policy can run alone
+        # (it holds the stand at idle), unlike the old one-way sit policy.
+        if not self.walking_session and not self.standing_session and not self.is_sitstand and not ("jump" in self.behavior_sessions):
+            raise ValueError("At least one of --walking, --standing, --sitstand, or --jump must be provided")
 
         # Determine initial active session and policy
         if self.walking_session:
@@ -351,10 +351,14 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
+        elif self.is_sitstand:
             # sitstand-only: start standing (posture flag 0).
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        else:
+            # jump-only: start standing (phase 0).
+            self.current_policy = "jump"
+            self.ort_session = self.behavior_sessions["jump"]
 
         # Get input/output names from active session
         self.input_name = self.ort_session.get_inputs()[0].name
@@ -487,6 +491,11 @@ class PolicyInference:
                 # all-zero twist is the STAND command for this policy, which is
                 # why feeding it the old sit-policy zero command did nothing.
                 cmd[0] = 1.0 if self.sit_mode else 0.0
+            elif self.current_policy == "jump":
+                # Standby standing command for jump policy: phase 0 -> [cos(0), sin(0), 0] = [1, 0, 0]
+                cmd[0] = 1.0
+                cmd[1] = 0.0
+                cmd[2] = 0.0
             # else standing/old-sit/ground_pick: leave twist 0 (ground_pick
             # writes its phase encoding later)
             cmd[3:7]  = self.head_offset
@@ -804,10 +813,14 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
-        else:
+        elif self.is_sitstand:
             # sitstand-only setup: the sitstand policy holds the stand (flag 0).
             self.current_policy = "sit"
             self.ort_session = self.sit_session
+        else:
+            # jump-only setup: return to jump session standing at phase 0.
+            self.current_policy = "jump"
+            self.ort_session = self.behavior_sessions["jump"]
         self._update_command()
         print(f"{name}: done → back to {self.current_policy}")
 
@@ -958,8 +971,8 @@ def main():
                              "compliant PU sole. e.g. --foot-solref 0.04")
     args = parser.parse_args()
 
-    if not args.walking and not args.standing and not args.sitstand:
-        parser.error("At least one of --walking, --standing or --sitstand must be provided")
+    if not args.walking and not args.standing and not args.sitstand and not args.jump:
+        parser.error("At least one of --walking, --standing, --sitstand, or --jump must be provided")
     if args.sitstand and not args.new_cmd_obs:
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade or args.jump) and not args.new_cmd_obs:
@@ -1269,6 +1282,8 @@ def main():
                     policy.body_cmd[:] = 0.0
                     policy._update_command()
                     print("Body pose cmd reset to zero")
+                elif policy.current_policy == "jump" and policy.behavior_mode is None:
+                    policy.trigger_behavior("jump")
                 else:
                     policy.set_vel_cmd(0.0, 0.0, 0.0)
             elif key == "t":
