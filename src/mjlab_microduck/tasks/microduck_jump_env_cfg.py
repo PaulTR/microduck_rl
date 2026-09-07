@@ -129,64 +129,63 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             del cfg.rewards[name]
 
     # ── Rewards: 4-Phase Biomechanical Jump Cycle ─────────────────────────────
-    # 1. Continuous reference trajectory tracking: dense Gaussian across leg joints
-    # Guides crouch dip (phi ∈ [0.00, 0.22]), push extension (phi ∈ [0.20, 0.42]),
-    # and landing-extended stand (phi ∈ [0.40, 1.00]). Always non-zero gradient!
+    # 1. Continuous reference trajectory tracking: focused on 6 sagittal leg pitch joints
     cfg.rewards["jump_trajectory_tracking"] = RewardTermCfg(
         func=microduck_mdp.jump_trajectory_tracking,
         weight=5.0,
-        params={"std": 0.30, "command_name": "twist"},
+        params={"std": 0.20, "command_name": "twist"},
     )
 
-    # 2. Push-off vertical velocity: positive vz > 0 while pushing against floor (phi ∈ [0.20, 0.42])
+    # 1b. Direct crouch dip: rewards lowering trunk by ~15 mm (phi ∈ [0.08, 0.24])
+    cfg.rewards["jump_crouch"] = RewardTermCfg(
+        func=microduck_mdp.jump_crouch_depth,
+        weight=4.0,
+        params={
+            "crouch_start": 0.08,
+            "crouch_end": 0.24,
+            "nominal_z": STAND_Z,
+            "target_dip": 0.015,
+            "command_name": "twist",
+        },
+    )
+
+    # 2. Push-off vertical velocity: positive vz > 0 during explosive extension (phi ∈ [0.20, 0.40])
     cfg.rewards["jump_push_velocity"] = RewardTermCfg(
         func=microduck_mdp.jump_push_velocity,
         weight=8.0,
         params={
             "push_start": 0.20,
-            "push_end": 0.42,
-            "sensor_name": feet_ground_cfg.name,
+            "push_end": 0.40,
+            "target_vz": 0.40,
             "command_name": "twist",
         },
     )
 
-    # 3. Airborne flight: both feet off ground (phi ∈ [0.38, 0.72]), scaled by apex lift height
+    # 3. Airborne flight: trunk height above ground (phi ∈ [0.35, 0.70]), scaled by apex lift height
     cfg.rewards["jump_airborne"] = RewardTermCfg(
         func=microduck_mdp.jump_airborne,
-        weight=6.0,
+        weight=8.0,
         params={
             "sensor_name": feet_ground_cfg.name,
-            "flight_start": 0.38,
-            "flight_end": 0.72,
-            "min_flight_height": STAND_Z,
+            "flight_start": 0.35,
+            "flight_end": 0.70,
+            "min_flight_height": STAND_Z + 0.002,
             "target_apex": APEX_Z,
             "command_name": "twist",
         },
     )
 
-    # 4. Landing & stand recovery: dense composite reward for upright HOME stand (phi ∈ [0.65, 0.08] wrap)
+    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.70, 0.05] wrap), GATED on having jumped
     cfg.rewards["jump_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_stand_composite,
-        weight=4.0,
+        weight=5.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.020,
             "upright_std": 0.15,
             "pose_std": 0.30,
-            "stand_start": 0.65,
-            "stand_end": 0.08,
-            "command_name": "twist",
-        },
-    )
-
-    # 4b. Grounded feet bonus after touchdown (phi ∈ [0.65, 0.08] wrap)
-    cfg.rewards["jump_feet_grounded"] = RewardTermCfg(
-        func=microduck_mdp.jump_feet_grounded,
-        weight=2.0,
-        params={
-            "sensor_name": feet_ground_cfg.name,
-            "stand_start": 0.65,
-            "stand_end": 0.08,
+            "stand_start": 0.70,
+            "stand_end": 0.05,
             "command_name": "twist",
         },
     )
@@ -217,10 +216,10 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     )
 
     # ── Sim2real regularisers ─────────────────────────────────────────────────
-    # Keep action_rate_l2 low so explosive push-off is not penalized
+    # Keep action_rate_l2 low so explosive push-off is not penalized during exploration
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=mdp.action_rate_l2,
-        weight=-0.003,
+        weight=-0.0005,
     )
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,

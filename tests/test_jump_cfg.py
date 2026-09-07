@@ -55,11 +55,11 @@ def test_jump_rewards_and_penalties_signs():
     r = cfg.rewards
 
     # Task progression rewards (must be positive)
+    assert "jump_crouch" in r and r["jump_crouch"].weight > 0
     assert "jump_trajectory_tracking" in r and r["jump_trajectory_tracking"].weight > 0
     assert "jump_push_velocity" in r and r["jump_push_velocity"].weight > 0
     assert "jump_airborne" in r and r["jump_airborne"].weight > 0
     assert "jump_stand" in r and r["jump_stand"].weight > 0
-    assert "jump_feet_grounded" in r and r["jump_feet_grounded"].weight > 0
 
     # Penalties (must be negative)
     assert "action_rate_l2" in r and r["action_rate_l2"].weight < 0
