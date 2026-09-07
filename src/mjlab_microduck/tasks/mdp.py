@@ -7194,8 +7194,8 @@ def roulade_lateral_velocity_penalty(
 
 JUMP_PERIOD: float = 1.2
 JUMP_STAND_Z: float = 0.115
-JUMP_CROUCH_Z: float = 0.085
-JUMP_TARGET_APEX_Z: float = 0.155
+JUMP_CROUCH_Z: float = 0.080
+JUMP_TARGET_APEX_Z: float = 0.170
 
 
 class JumpPhaseCommand(UniformVelocityCommand):
@@ -7271,10 +7271,17 @@ def _jump_phase_window(
     end: float,
     blend: float = 0.03,
 ) -> torch.Tensor:
-    """Smooth bell/plateau in [0, 1] over phase range [start, end]."""
-    up = torch.clamp((phase - start) / max(blend, 1e-5), 0.0, 1.0)
-    dn = torch.clamp((end - phase) / max(blend, 1e-5), 0.0, 1.0)
-    w = torch.minimum(up, dn)
+    """Smooth bell/plateau in [0, 1] over phase range [start, end].
+    Supports wrap-around windows when start > end (e.g. [0.68, 1.00] ∪ [0.00, 0.08]).
+    """
+    if start <= end:
+        up = torch.clamp((phase - start) / max(blend, 1e-5), 0.0, 1.0)
+        dn = torch.clamp((end - phase) / max(blend, 1e-5), 0.0, 1.0)
+        w = torch.minimum(up, dn)
+    else:
+        up_end = torch.clamp((end - phase) / max(blend, 1e-5), 0.0, 1.0)
+        up_start = torch.clamp((phase - start) / max(blend, 1e-5), 0.0, 1.0)
+        w = torch.maximum(up_end, up_start)
     return w * w * (3.0 - 2.0 * w)
 
 
@@ -7284,8 +7291,8 @@ def jump_crouch_composite(
     height_std: float = 0.015,
     upright_std: float = 0.20,
     sensor_name: str = "feet_ground_contact",
-    crouch_start: float = 0.00,
-    crouch_end: float = 0.25,
+    crouch_start: float = 0.08,
+    crouch_end: float = 0.28,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7317,8 +7324,8 @@ def jump_crouch_composite(
 
 def jump_push_velocity(
     env: ManagerBasedRlEnv,
-    push_start: float = 0.20,
-    push_end: float = 0.45,
+    push_start: float = 0.25,
+    push_end: float = 0.48,
     sensor_name: str = "feet_ground_contact",
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -7335,13 +7342,13 @@ def jump_push_velocity(
     # World-frame vertical velocity vz
     v_w = asset.data.root_link_lin_vel_w
     vz = v_w[:, 2]
-    # Reward positive vz up to ~1.0 m/s
-    vz_score = torch.clamp(vz / 0.6, min=0.0, max=1.5)
+    # Reward positive vz up to ~1.2 m/s
+    vz_score = torch.clamp(vz / 0.75, min=0.0, max=1.5)
 
-    # Must be upright (tilt < 20 deg)
+    # Must be upright (tilt < 18 deg)
     quat = asset.data.root_link_quat_w
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright_gate = (tilt_sq < 0.12).float()
+    upright_gate = (tilt_sq < 0.10).float()
 
     # Must still have foot contact (pushing against the ground)
     feet_down = torch.ones(env.num_envs, device=env.device)
@@ -7359,14 +7366,14 @@ def jump_airborne(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
     flight_start: float = 0.45,
-    flight_end: float = 0.65,
+    flight_end: float = 0.70,
     min_flight_height: float = 0.120,
+    target_apex: float = JUMP_TARGET_APEX_Z,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward when both feet are airborne, STRICTLY GATED on being upright and above standing height.
-
-    If the robot falls onto its back, tilt is violated and height is low -> reward is EXACTLY 0.
+    """Reward when both feet are airborne, strictly gated on upright trunk,
+    SCALED CONTINUOUSLY BY LIFT HEIGHT so higher jumps earn proportionally more!
     """
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, flight_start, flight_end)
@@ -7387,19 +7394,20 @@ def jump_airborne(
     tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
     upright_gate = (tilt_sq < 0.07).float()
 
-    # 3. Height gate: trunk MUST be above min_flight_height
+    # 3. Continuous lift scaling:
+    # A 5mm hop gets ~0.10. A 50mm jump to 0.170m gets 1.0. Higher gets up to 1.5.
     z = asset.data.root_link_pos_w[:, 2]
-    height_gate = (z > min_flight_height).float()
+    lift_scale = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=1.5)
 
-    return window * both_feet_airborne * upright_gate * height_gate
+    return window * both_feet_airborne * upright_gate * lift_scale
 
 
 def jump_apex_height(
     env: ManagerBasedRlEnv,
     target_height: float = JUMP_TARGET_APEX_Z,
-    std: float = 0.025,
+    std: float = 0.030,
     flight_start: float = 0.45,
-    flight_end: float = 0.65,
+    flight_end: float = 0.70,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7424,12 +7432,14 @@ def jump_stand_composite(
     height_std: float = 0.020,
     upright_std: float = 0.20,
     pose_std: float = 0.30,
-    stand_start: float = 0.65,
-    stand_end: float = 1.00,
+    stand_start: float = 0.68,
+    stand_end: float = 0.08,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward for landing on two feet and standing upright in HOME posture during landing phase."""
+    """Reward for landing on two feet and standing upright in HOME posture.
+    Wraps seamlessly around phase 1.0 -> 0.0 so standing holds indefinitely!
+    """
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, stand_start, stand_end)
     asset: Entity = env.scene[asset_cfg.name]
@@ -7455,11 +7465,11 @@ def jump_stand_composite(
 def jump_feet_grounded(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    stand_start: float = 0.65,
-    stand_end: float = 1.00,
+    stand_start: float = 0.68,
+    stand_end: float = 0.08,
     command_name: str = "twist",
 ) -> torch.Tensor:
-    """Reward for keeping both feet grounded after touchdown."""
+    """Reward for keeping both feet grounded after touchdown and during initial stand."""
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, stand_start, stand_end)
     if sensor_name not in env.scene.sensors:
@@ -7487,6 +7497,39 @@ def head_posture_penalty(
     head_ids = [5, 6, 7, 8]  # neck_pitch, head_pitch, head_yaw, head_roll
     error = joint_pos[:, head_ids] - default_pos[:, head_ids]
     return torch.sum(error.pow(2), dim=-1)
+
+
+def jump_pitch_rate_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes pitch angular velocity (ω_y²). Positive quantity; use negative weight.
+
+    Prevents backwards / forwards pitch rotation during push-off and flight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    omega_b = asset.data.root_link_ang_vel_b
+    return torch.nan_to_num(omega_b[:, 1].pow(2), nan=0.0)
+
+
+def jump_landing_damping(
+    env: ManagerBasedRlEnv,
+    damp_start: float = 0.78,
+    damp_end: float = 0.05,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes residual linear and angular velocity during landing settle.
+
+    Positive quantity; use negative weight. Damps bounce and backward sway to a solid stop.
+    """
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, damp_start, damp_end)
+    asset: Entity = env.scene[asset_cfg.name]
+    lin_v = asset.data.root_link_lin_vel_w
+    ang_v = asset.data.root_link_ang_vel_b
+    vel_sq = lin_v.pow(2).sum(dim=-1) + 0.1 * ang_v.pow(2).sum(dim=-1)
+    return window * torch.nan_to_num(vel_sq, nan=0.0)
 
 
 def jump_yaw_rate_penalty(
