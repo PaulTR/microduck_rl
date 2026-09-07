@@ -216,8 +216,8 @@ class PolicyInference:
                  sit_onnx_path=None, new_cmd_obs=False, slope_onnx_path=None,
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
-                 roulade_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0):
+                 roulade_onnx_path=None, jump_onnx_path=None,
+                 kick_duration=3.0, roulade_duration=2.0, jump_duration=1.2):
         self.bam_ctrl = bam_ctrl  # bam.mujoco.MujocoController (None = legacy position actuators)
         self.model = model
         self.data = data
@@ -262,6 +262,22 @@ class PolicyInference:
             print(f"Standing policy output: {self.standing_session.get_outputs()[0].name}, shape: {s_output_shape}")
             if self.walking_session:
                 print(f"Policy switching threshold: {switch_threshold} (vel command magnitude)")
+
+        # Load jump policy (episodic two-legged vertical jump in place)
+        self.jump_session = None
+        self.jump_mode = False
+        self.jump_phase = 0.0
+        self.jump_duration = jump_duration
+        self.is_jump_only = False
+        if jump_onnx_path:
+            if not self.new_cmd_obs:
+                raise ValueError(
+                    "--jump policies use the unified 13D command obs (61D); run with --new-cmd-obs"
+                )
+            print(f"\nLoading jump policy from: {jump_onnx_path}")
+            self.jump_session = ort.InferenceSession(jump_onnx_path)
+            j_input_shape = self.jump_session.get_inputs()[0].shape
+            print(f"Jump policy input shape: {j_input_shape} (duration={jump_duration:.1f}s)")
 
         # Load ground pick policy
         self.ground_pick_session = None
@@ -340,8 +356,8 @@ class PolicyInference:
 
         # Validate at least one policy loaded. A sitstand policy can run alone
         # (it holds the stand at flag=0), unlike the old one-way sit policy.
-        if not self.walking_session and not self.standing_session and not self.is_sitstand:
-            raise ValueError("At least one of --walking, --standing or --sitstand must be provided")
+        if not self.walking_session and not self.standing_session and not self.is_sitstand and not self.jump_session:
+            raise ValueError("At least one of --walking, --standing, --sitstand or --jump must be provided")
 
         # Determine initial active session and policy
         if self.walking_session:
@@ -350,6 +366,12 @@ class PolicyInference:
         elif self.standing_session:
             self.current_policy = "standing"
             self.ort_session = self.standing_session
+        elif self.jump_session:
+            # jump-only: start executing the jump from phase 0
+            self.is_jump_only = True
+            self.current_policy = "jump"
+            self.ort_session = self.jump_session
+            self.jump_mode = True
         else:
             # sitstand-only: start standing (posture flag 0).
             self.current_policy = "sit"
@@ -481,6 +503,10 @@ class PolicyInference:
             # twist slot (or phase encoding for ground_pick — overwritten there)
             if self.current_policy == "walking":
                 cmd[0:3] = self.vel_cmd
+            elif self.current_policy == "jump":
+                cmd[0] = np.cos(2 * np.pi * self.jump_phase)
+                cmd[1] = np.sin(2 * np.pi * self.jump_phase)
+                cmd[2] = 0.0
             elif self.current_policy == "sit" and self.is_sitstand:
                 # Sitstand posture flag: 1 = sit, 0 = stand. NOT zeros — the
                 # all-zero twist is the STAND command for this policy, which is
@@ -523,6 +549,8 @@ class PolicyInference:
             return  # Don't switch during slope mode
         if self.behavior_mode is not None:
             return  # Don't switch during a kick/roulade
+        if self.jump_mode or self.is_jump_only:
+            return  # Don't switch during jump
 
         magnitude = float(np.linalg.norm(self.vel_cmd))
         new_policy = "standing" if magnitude <= self.switch_threshold else "walking"
@@ -728,6 +756,56 @@ class PolicyInference:
         self.command[1] = np.sin(2 * np.pi * self.ground_pick_phase)
         self.command[2] = 0.0
 
+    def trigger_jump(self):
+        """Start one vertical jump cycle."""
+        if self.jump_session is None:
+            print("Jump unavailable: no --jump policy loaded")
+            return
+        if self.sit_mode:
+            print("Cannot jump while sitting")
+            return
+        if self.behavior_mode is not None:
+            print(f"Cannot jump during {self.behavior_mode}")
+            return
+        self.jump_mode = True
+        self.jump_phase = 0.0
+        self.ort_session = self.jump_session
+        self.current_policy = "jump"
+        self._update_command()
+        print(f"Jump: started (duration={self.jump_duration:.1f}s)")
+
+    def _end_jump(self):
+        """Switch back after jump cycle completes, or hold standing."""
+        self.jump_mode = False
+        if self.walking_session:
+            self.current_policy = "walking"
+            self.ort_session = self.walking_session
+            self.vel_cmd = np.zeros(3, dtype=np.float32)
+        elif self.standing_session:
+            self.current_policy = "standing"
+            self.ort_session = self.standing_session
+            self.vel_cmd = np.zeros(3, dtype=np.float32)
+        else:
+            # Standalone jump policy: keep jump session active at final phase (stand)
+            self.current_policy = "jump"
+            self.ort_session = self.jump_session
+            self.jump_phase = 1.0
+        self._update_command()
+        print(f"Jump: done → {self.current_policy}")
+
+    def update_jump_phase(self, dt: float):
+        """Advance jump phase; auto-exit when full cycle completes."""
+        if not self.jump_mode:
+            return
+        new_phase = self.jump_phase + dt / self.jump_duration
+        if new_phase >= 1.0:
+            self._end_jump()
+            return
+        self.jump_phase = new_phase
+        self.command[0] = np.cos(2 * np.pi * self.jump_phase)
+        self.command[1] = np.sin(2 * np.pi * self.jump_phase)
+        self.command[2] = 0.0
+
     def trigger_behavior(self, name):
         """Start an episodic behavior (kick_left / kick_right / roulade).
 
@@ -906,8 +984,10 @@ def main():
     parser.add_argument("--kick-left", type=str, default=None, help="Path to LEFT-foot ball kick policy ONNX (press K to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--kick-right", type=str, default=None, help="Path to RIGHT-foot ball kick policy ONNX (press L to trigger). Requires --new-cmd-obs. Loads a scene with a ball.")
     parser.add_argument("--roulade", type=str, default=None, help="Path to roulade (forward roll) policy ONNX (press R to trigger). Requires --new-cmd-obs.")
+    parser.add_argument("--jump", type=str, default=None, help="Path to two-legged vertical jump policy ONNX (press J to trigger, X to reset). Requires --new-cmd-obs. Can run standalone.")
     parser.add_argument("--kick-duration", type=float, default=3.0, help="Seconds a kick policy stays active before handing back to standing/walking (default: 3.0)")
     parser.add_argument("--roulade-duration", type=float, default=2.0, help="Seconds the roulade policy stays active before handing back to standing/walking (default: 2.0, ~the roll itself; the standing/walking policy takes over for the settle)")
+    parser.add_argument("--jump-duration", type=float, default=1.2, help="Seconds for a jump cycle (default: 1.2)")
     parser.add_argument("--lin-vel-x", type=float, default=0.0, help="Initial linear velocity X command (m/s)")
     parser.add_argument("--lin-vel-y", type=float, default=0.0, help="Initial linear velocity Y command (m/s)")
     parser.add_argument("--ang-vel-z", type=float, default=0.0, help="Initial angular velocity Z command (rad/s)")
@@ -949,14 +1029,18 @@ def main():
                              "compliant PU sole. e.g. --foot-solref 0.04")
     args = parser.parse_args()
 
-    if not args.walking and not args.standing and not args.sitstand:
-        parser.error("At least one of --walking, --standing or --sitstand must be provided")
+    if not args.walking and not args.standing and not args.sitstand and not args.jump:
+        parser.error("At least one of --walking, --standing, --sitstand or --jump must be provided")
     if args.sitstand and not args.new_cmd_obs:
         parser.error("--sitstand policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and not args.new_cmd_obs:
         parser.error("--kick-left/--kick-right/--roulade policies use the unified 13D command obs (61D); add --new-cmd-obs")
     if (args.kick_left or args.kick_right or args.roulade) and args.roller:
         parser.error("kick/roulade policies are trained on the walking robot, not the roller model")
+    if args.jump and not args.new_cmd_obs:
+        parser.error("--jump policies use the unified 13D command obs (61D); add --new-cmd-obs")
+    if args.jump and args.roller:
+        parser.error("jump policies are trained on the walking robot, not the roller model")
 
     # Parse delay arguments
     delay_min_lag = 0
@@ -1057,8 +1141,10 @@ def main():
         kick_left_onnx_path=args.kick_left,
         kick_right_onnx_path=args.kick_right,
         roulade_onnx_path=args.roulade,
+        jump_onnx_path=args.jump,
         kick_duration=args.kick_duration,
         roulade_duration=args.roulade_duration,
+        jump_duration=args.jump_duration,
     )
     policy.set_vel_cmd(args.lin_vel_x, args.lin_vel_y, args.ang_vel_z)
 
@@ -1138,6 +1224,8 @@ def main():
         print(f"{kind} policy: loaded  (press Y to toggle)")
     if policy.slope_session:
         print(f"Slope policy: loaded  (press Y to toggle, passive descent)")
+    if policy.jump_session:
+        print(f"Jump policy: loaded  (press J to jump, X to reset & jump)")
     _behavior_keys = {"kick_left": "K", "kick_right": "L", "roulade": "R"}
     for _name in policy.behavior_sessions:
         print(f"{_name} policy: loaded  (press {_behavior_keys[_name]}, "
@@ -1197,6 +1285,24 @@ def main():
         data.qvel[_trunk_qvel_adr + 0] = vx
         data.qvel[_trunk_qvel_adr + 1] = vy
         print(f"PUSH applied: v=[{vx:.2f}, {vy:.2f}, 0] m/s (angle={np.degrees(angle):.0f}°)")
+
+    def reset_sim():
+        """Reset robot pose and velocities to default standing equilibrium."""
+        data.qpos[qpos_adr + 0] = 0.0
+        data.qpos[qpos_adr + 1] = 0.0
+        data.qpos[qpos_adr + 2] = 0.1385 if args.roller else 0.125
+        data.qpos[qpos_adr + 3:qpos_adr + 7] = [1, 0, 0, 0]
+        for i, qpos_idx in enumerate(policy.joint_qpos_indices):
+            data.qpos[qpos_idx] = policy.default_pose[i]
+        data.qvel[:] = 0.0
+        if bam_ctrl is not None:
+            bam_ctrl.reset(data.qpos)
+        policy.last_action[:] = 0.0
+        if policy.action_buffer is not None:
+            policy.action_buffer = [np.zeros(policy.n_joints, dtype=np.float32) for _ in range(len(policy.action_buffer))]
+        policy.set_position_targets(policy.default_pose)
+        mujoco.mj_forward(model, data)
+        print("Simulation state reset to default stand")
 
     # Keys come from the TERMINAL (raw stdin, see TerminalInput) — not from the
     # MuJoCo viewer window, whose keypresses also fire built-in visualization
@@ -1274,6 +1380,12 @@ def main():
                 policy.trigger_behavior("kick_right")
             elif key == "r":
                 policy.trigger_behavior("roulade")
+            elif key == "j":
+                policy.trigger_jump()
+            elif key == "x":
+                reset_sim()
+                if policy.jump_session is not None:
+                    policy.trigger_jump()
             elif key == "q":
                 quit_requested = True
                 print("Quit requested")
@@ -1341,6 +1453,8 @@ def main():
     print("  K:                kick with LEFT foot (requires --kick-left)")
     print("  L:                kick with RIGHT foot (requires --kick-right)")
     print("  R:                roulade / forward roll (requires --roulade)")
+    print("  J:                trigger vertical jump (requires --jump)")
+    print("  X:                reset robot to stand (and trigger jump if --jump)")
     print(f"  P:                random push (trunk vel = {PUSH_MAX:.1f} m/s in random direction)")
     print("  Q:                quit")
     print("  [ Body pose mode — press B to toggle ]")
@@ -1390,6 +1504,7 @@ def main():
 
                 policy.update_ground_pick_phase(actual_dt)
                 policy.update_behavior(actual_dt)
+                policy.update_jump_phase(actual_dt)
 
                 if policy_enabled:
                     action = policy.infer()

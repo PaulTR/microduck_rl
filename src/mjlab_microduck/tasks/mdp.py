@@ -7186,3 +7186,336 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# =========================================================================== #
+# Microduck Jump Task (two-legged vertical jump in place)                      #
+# =========================================================================== #
+
+JUMP_PERIOD: float = 1.2
+JUMP_STAND_Z: float = 0.115
+JUMP_CROUCH_Z: float = 0.100
+JUMP_TARGET_APEX_Z: float = 0.150
+
+
+class JumpPhaseCommand(UniformVelocityCommand):
+    """Phase-encoding command for the Microduck vertical jump task.
+
+    Replaces the velocity command in the twist slot with cyclic phase:
+        command = [cos(2π·phase), sin(2π·phase), 0]
+
+    Phase progresses linearly from 0 to 1 over ``period`` (default 1.2s).
+    By default ``randomize_phase=False`` so each episode starts standing at phase 0.
+    """
+
+    PERIOD: float = JUMP_PERIOD
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._jump_phase = torch.zeros(self.num_envs, device=self.device)
+        self._period = float(getattr(cfg, "period", self.PERIOD))
+        self._randomize_phase = bool(getattr(cfg, "randomize_phase", False))
+        self._update_phase_command()
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.vel_command_b
+
+    def _update_phase_command(self) -> None:
+        self.vel_command_b[:, 0] = torch.cos(2 * torch.pi * self._jump_phase)
+        self.vel_command_b[:, 1] = torch.sin(2 * torch.pi * self._jump_phase)
+        self.vel_command_b[:, 2] = 0.0
+
+    def compute(self, dt: float) -> None:
+        self._jump_phase = (self._jump_phase + dt / self._period) % 1.0
+        self._update_phase_command()
+
+    def reset(self, env_ids: torch.Tensor | None) -> dict:
+        if env_ids is not None and len(env_ids) > 0:
+            if self._randomize_phase:
+                self._jump_phase[env_ids] = torch.rand(len(env_ids), device=self.device)
+            else:
+                self._jump_phase[env_ids] = 0.0
+            self._update_phase_command()
+        return {}
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        pass
+
+    def _update_command(self) -> None:
+        pass
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class JumpPhaseCommandCfg(UniformVelocityCommandCfg):
+    class_type: type = JumpPhaseCommand
+    period: float = JUMP_PERIOD
+    randomize_phase: bool = False
+
+    def build(self, env: ManagerBasedRlEnv) -> "JumpPhaseCommand":
+        return JumpPhaseCommand(self, env)
+
+
+def jump_phase_from_command(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    """Extract phase φ ∈ [0, 1) from the twist command slot."""
+    cmd = env.command_manager.get_command(command_name)
+    return (torch.atan2(cmd[:, 1], cmd[:, 0]) / (2 * torch.pi)) % 1.0
+
+
+def _jump_phase_window(
+    phase: torch.Tensor,
+    start: float,
+    end: float,
+    blend: float = 0.03,
+) -> torch.Tensor:
+    """Smooth bell/plateau in [0, 1] over phase range [start, end].
+    Supports wrap-around windows when start > end (e.g. [0.65, 1.00] ∪ [0.00, 0.08]).
+    """
+    if start <= end:
+        up = torch.clamp((phase - start) / max(blend, 1e-5), 0.0, 1.0)
+        dn = torch.clamp((end - phase) / max(blend, 1e-5), 0.0, 1.0)
+        w = torch.minimum(up, dn)
+    else:
+        up_end = torch.clamp((end - phase) / max(blend, 1e-5), 0.0, 1.0)
+        up_start = torch.clamp((phase - start) / max(blend, 1e-5), 0.0, 1.0)
+        w = torch.maximum(up_end, up_start)
+    return w * w * (3.0 - 2.0 * w)
+
+
+def jump_reference_qpos(phase: torch.Tensor, default_pos: torch.Tensor) -> torch.Tensor:
+    """Compute kinematic reference joint angles q*(phase) of shape (N, 14).
+
+    Guides crouch dip (phi ≈ 0.18), push extension (phi ≈ 0.30), and landing/stand (phi >= 0.40).
+    """
+    crouch_w = torch.exp(-((phase - 0.18) / 0.06).pow(2)).unsqueeze(-1)
+    push_w = torch.exp(-((phase - 0.30) / 0.05).pow(2)).unsqueeze(-1)
+
+    target_pos = default_pos.clone()
+    # Left leg: hip_pitch (idx 2), knee (idx 3), ankle (idx 4)
+    target_pos[:, 2] += crouch_w[:, 0] * 0.10 - push_w[:, 0] * 0.08
+    target_pos[:, 3] += -crouch_w[:, 0] * 0.35 + push_w[:, 0] * 0.05
+    target_pos[:, 4] += crouch_w[:, 0] * 0.10 - push_w[:, 0] * 0.10
+
+    # Right leg (mirrored signs): hip_pitch (idx 11), knee (idx 12), ankle (idx 13)
+    target_pos[:, 11] += -crouch_w[:, 0] * 0.10 + push_w[:, 0] * 0.08
+    target_pos[:, 12] += crouch_w[:, 0] * 0.35 - push_w[:, 0] * 0.05
+    target_pos[:, 13] += -crouch_w[:, 0] * 0.10 + push_w[:, 0] * 0.10
+    return target_pos
+
+
+def jump_trajectory_tracking(
+    env: ManagerBasedRlEnv,
+    std: float = 0.30,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Dense Gaussian tracking of the 4-phase kinematic jump reference trajectory across leg joints.
+
+    Provides non-zero continuous gradient at every time step:
+      - phi ∈ [0.00, 0.22]: smooth crouch dip (knees flex to -0.35 rad, trunk lowers 15 mm).
+      - phi ∈ [0.20, 0.42]: rapid leg extension for push-off (knees drive to 0.0, ankles push off).
+      - phi ∈ [0.40, 1.00]: extended legs in STAND_POSE for mid-air flight, landing, and stable stand.
+    """
+    phase = jump_phase_from_command(env, command_name)  # (N,)
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_pos = _servo_joint_pos(env, asset)            # (N, 14)
+    default_pos = _servo_default_joint_pos(env, asset)  # (N, 14)
+
+    target_pos = jump_reference_qpos(phase, default_pos)
+
+    # Compare on the 10 leg joints
+    leg_ids = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
+    error = joint_pos[:, leg_ids] - target_pos[:, leg_ids]
+    error_sq = error.pow(2).mean(dim=-1)
+    return torch.exp(-error_sq / (std * std))
+
+
+def jump_push_velocity(
+    env: ManagerBasedRlEnv,
+    push_start: float = 0.20,
+    push_end: float = 0.42,
+    sensor_name: str = "feet_ground_contact",
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Rewards positive vertical velocity (vz > 0) while pushing against the ground during push-off."""
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, push_start, push_end)
+    asset: Entity = env.scene[asset_cfg.name]
+
+    # World-frame vertical velocity vz
+    v_w = asset.data.root_link_lin_vel_w
+    vz = v_w[:, 2]
+    vz_score = torch.clamp(vz / 0.80, min=0.0, max=1.5)
+
+    # Must still have foot contact (pushing against the ground)
+    feet_down = torch.ones(env.num_envs, device=env.device)
+    if sensor_name in env.scene.sensors:
+        sensor = env.scene.sensors[sensor_name]
+        found = sensor.data.found
+        if found is not None and found.shape[-1] >= 2:
+            contacts = found.view(found.shape[0], -1)[:, :2] > 0
+            feet_down = (contacts[:, 0] | contacts[:, 1]).float()
+
+    return window * vz_score * feet_down
+
+
+def jump_airborne(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    flight_start: float = 0.38,
+    flight_end: float = 0.72,
+    min_flight_height: float = 0.115,
+    target_apex: float = JUMP_TARGET_APEX_Z,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward when both feet are airborne during flight, scaled continuously by apex height."""
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, flight_start, flight_end)
+
+    # 1. Contact check: both feet off ground
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None or found.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    contacts = found.view(found.shape[0], -1)[:, :2] > 0
+    both_feet_airborne = (~contacts[:, 0] & ~contacts[:, 1]).float()
+
+    # 2. Continuous lift scaling above standing height (0.115 m)
+    asset: Entity = env.scene[asset_cfg.name]
+    z = asset.data.root_link_pos_w[:, 2]
+    lift_scale = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=1.5)
+
+    return window * both_feet_airborne * lift_scale
+
+
+def jump_stand_composite(
+    env: ManagerBasedRlEnv,
+    target_height: float = JUMP_STAND_Z,
+    height_std: float = 0.020,
+    upright_std: float = 0.15,
+    pose_std: float = 0.30,
+    stand_start: float = 0.65,
+    stand_end: float = 0.08,
+    command_name: str = "twist",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Reward for landing on two feet and settling stably into upright HOME posture."""
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, stand_start, stand_end)
+    asset: Entity = env.scene[asset_cfg.name]
+
+    # Height score
+    z = asset.data.root_link_pos_w[:, 2]
+    h_score = torch.exp(-((z - target_height) / height_std).pow(2))
+
+    # Upright trunk orientation score (gx² + gy²)
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    u_score = torch.exp(-tilt_sq / (upright_std * upright_std))
+
+    # Standing pose score across all 14 servos
+    joint_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    p_score = torch.exp(-((joint_pos - default_pos) / pose_std).pow(2)).mean(dim=-1)
+
+    return window * (h_score * u_score * p_score)
+
+
+def jump_feet_grounded(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "feet_ground_contact",
+    stand_start: float = 0.65,
+    stand_end: float = 0.08,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """Reward for keeping both feet grounded after touchdown and during initial stand."""
+    phase = jump_phase_from_command(env, command_name)
+    window = _jump_phase_window(phase, stand_start, stand_end)
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None or found.shape[-1] < 2:
+        return torch.zeros(env.num_envs, device=env.device)
+    contacts = found.view(found.shape[0], -1)[:, :2] > 0
+    both_feet_down = (contacts[:, 0] & contacts[:, 1]).float()
+    return window * both_feet_down
+
+
+def head_posture_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes deviation of head and neck joints from default HOME posture.
+
+    Positive quantity; use negative weight. Stops head-curling and head-bobbing.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    head_ids = [5, 6, 7, 8]  # neck_pitch, head_pitch, head_yaw, head_roll
+    error = joint_pos[:, head_ids] - default_pos[:, head_ids]
+    return torch.sum(error.pow(2), dim=-1)
+
+
+def jump_verticality_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes body tilt (projected gravity gx² + gy²).
+
+    Positive quantity; use negative weight. Keeps trunk vertical.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    return torch.nan_to_num(tilt_sq, nan=0.0)
+
+
+def jump_yaw_rate_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes yaw angular velocity (ω_z²). Positive quantity; use negative weight.
+
+    Completely suppresses spinning in circles.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    omega_b = asset.data.root_link_ang_vel_b
+    return torch.nan_to_num(omega_b[:, 2].pow(2), nan=0.0)
+
+
+def jump_horizontal_velocity_penalty(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Penalizes horizontal velocity (vx² + vy²) in the WORLD frame.
+
+    Positive quantity; use negative weight. Keeps the jump in place.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    v_w = asset.data.root_link_lin_vel_w
+    horiz_speed_sq = v_w[:, 0].pow(2) + v_w[:, 1].pow(2)
+    return torch.nan_to_num(horiz_speed_sq, nan=0.0)
+
+
+def non_foot_ground_contact_termination(
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "non_foot_ground_contact",
+) -> torch.Tensor:
+    """Terminates if trunk, hips, legs/knees, head, or jaw touch the terrain."""
+    if sensor_name not in env.scene.sensors:
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    sensor = env.scene.sensors[sensor_name]
+    found = sensor.data.found
+    if found is None:
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    return (found.view(found.shape[0], -1) > 0).any(dim=-1)
+
