@@ -40,13 +40,14 @@ def test_jump_env_cfg_episode_length_and_command():
 
 
 def test_jump_spawn_pose_range():
-    """Verify spawn fix: tight z and yaw ranges prevent mid-air drops and early collapse."""
+    """Verify spawn fix: z set to nominal standing height (0.12, 0.13) above terrain origin."""
     cfg = make_microduck_jump_env_cfg()
     pose_range = cfg.events["reset_base"].params["pose_range"]
-    assert pose_range["z"] == (-0.003, 0.003), f"z range unexpected: {pose_range['z']}"
+    assert pose_range["z"] == (0.12, 0.13), f"z range unexpected: {pose_range['z']}"
     assert pose_range["yaw"] == (-0.05, 0.05), f"yaw range unexpected: {pose_range['yaw']}"
     assert pose_range["x"] == (-0.02, 0.02)
     assert pose_range["y"] == (-0.02, 0.02)
+    assert "reset_jump_state" in cfg.events
 
 
 def test_jump_rewards_and_penalties_signs():
@@ -76,7 +77,7 @@ def test_jump_terminations():
 
     assert "time_out" in terms
     assert "fell_over" in terms
-    assert terms["fell_over"].params["limit_angle"] == 0.40  # ~23 degrees
+    assert terms["fell_over"].params["limit_angle"] == 1.0  # ~57 degrees
     assert "nan_state" in terms
 
 

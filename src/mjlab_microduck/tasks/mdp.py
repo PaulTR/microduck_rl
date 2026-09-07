@@ -7345,7 +7345,8 @@ def jump_crouch_depth(
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, crouch_start, crouch_end)
     asset: Entity = env.scene[asset_cfg.name]
-    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2], nan=nominal_z)
+    origin_z = env.scene.env_origins[:, 2]
+    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=nominal_z)
     dip = nominal_z - z
     return window * torch.clamp(dip / target_dip, min=0.0, max=1.5)
 
@@ -7368,6 +7369,22 @@ def jump_push_velocity(
     return window * torch.clamp(vz / target_vz, min=0.0, max=2.0)
 
 
+def reset_jump_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reset per-episode jump tracking state on episode reset."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    asset: Entity = env.scene[asset_cfg.name]
+    origin_z = env.scene.env_origins[env_ids, 2]
+    z = torch.nan_to_num(asset.data.root_link_pos_w[env_ids, 2] - origin_z, nan=0.0)
+    if not hasattr(env, "_jump_max_z") or env._jump_max_z.shape[0] != env.num_envs:
+        env._jump_max_z = torch.zeros(env.num_envs, device=env.device)
+    env._jump_max_z[env_ids] = z
+
+
 def jump_airborne(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
@@ -7378,11 +7395,12 @@ def jump_airborne(
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards apex flight height (z > 0.122 m) during flight window phi in [0.35, 0.70]."""
+    """Rewards apex flight height (z > 0.122 m above terrain origin) during flight window phi in [0.35, 0.70]."""
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, flight_start, flight_end)
     asset: Entity = env.scene[asset_cfg.name]
-    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2], nan=0.0)
+    origin_z = env.scene.env_origins[:, 2]
+    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
     # Track maximum height achieved in this episode
     if not hasattr(env, "_jump_max_z") or env._jump_max_z.shape[0] != env.num_envs:
@@ -7421,9 +7439,10 @@ def jump_stand_composite(
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, stand_start, stand_end)
     asset: Entity = env.scene[asset_cfg.name]
-    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2], nan=0.0)
+    origin_z = env.scene.env_origins[:, 2]
+    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
-    # Gate: only reward stand if the robot actually achieved lift (max_z > 0.123 m)
+    # Gate: only reward stand if the robot actually achieved lift (max_z > 0.122 m)
     max_z = getattr(env, "_jump_max_z", z)
     lift_gate = torch.clamp((max_z - 0.122) / 0.008, min=0.0, max=1.0)
 

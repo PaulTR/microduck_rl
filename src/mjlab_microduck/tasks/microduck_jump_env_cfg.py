@@ -314,7 +314,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=base_mdp.bad_orientation,
         params={
-            "limit_angle": 0.40,  # ~23 deg tilt limit (allows jump dynamics, cuts fallen states)
+            "limit_angle": 1.0,  # ~57 deg tilt limit (allows dynamic push & landing, cuts fallen states)
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
     )
@@ -327,10 +327,14 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.events["reset_base"].params["pose_range"] = {
         "x": (-0.02, 0.02),
         "y": (-0.02, 0.02),
-        "z": (-0.003, 0.003),
+        "z": (0.12, 0.13),
         "yaw": (-0.05, 0.05),
     }
 
+    cfg.events["reset_jump_state"] = EventTermCfg(
+        func=microduck_mdp.reset_jump_state,
+        mode="reset",
+    )
     cfg.events["expand_bam_friction_fields"] = EventTermCfg(
         func=microduck_mdp.expand_bam_friction_fields,
         mode="startup",
