@@ -77,7 +77,6 @@ def test_jump_terminations():
     assert "time_out" in terms
     assert "fell_over" in terms
     assert terms["fell_over"].params["limit_angle"] == 0.40  # ~23 degrees
-    assert "non_foot_contact" in terms
     assert "nan_state" in terms
 
 

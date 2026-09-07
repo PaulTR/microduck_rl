@@ -83,5 +83,5 @@ uv run scripts/infer_policy.py --jump <path_to_exported_policy.onnx> --new-cmd-o
 | **Episode Length** | 1.2 s (60 control steps @ 50 Hz) |
 | **Actuator Model** | BAM M6 voltage-controlled Dynamixel XL330 |
 | **Bilateral Symmetry** | Enabled (`PpoWithSymmetryCfg` with 61D observation swap table) |
-| **Terminations** | `fell_over` (tilt > 23°), `non_foot_contact` (any body part touches floor), `nan_state` |
+| **Terminations** | `fell_over` (tilt > 23°), `nan_state` |
 | **Spawn Range** | $z \in [-3, +3]$ mm, $\text{yaw} \in [-0.05, +0.05]$ rad (no mid-air drop) |
