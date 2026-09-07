@@ -7348,7 +7348,7 @@ def jump_push_velocity(
 
     # World-frame vertical velocity vz
     v_w = asset.data.root_link_lin_vel_w
-    vz = v_w[:, 2]
+    vz = torch.nan_to_num(v_w[:, 2], nan=0.0)
     vz_score = torch.clamp(vz / 0.80, min=0.0, max=1.5)
 
     # Must still have foot contact (pushing against the ground)
@@ -7389,7 +7389,7 @@ def jump_airborne(
 
     # 2. Continuous lift scaling above standing height (0.115 m)
     asset: Entity = env.scene[asset_cfg.name]
-    z = asset.data.root_link_pos_w[:, 2]
+    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2], nan=0.0)
     lift_scale = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=1.5)
 
     return window * both_feet_airborne * lift_scale
@@ -7412,7 +7412,7 @@ def jump_stand_composite(
     asset: Entity = env.scene[asset_cfg.name]
 
     # Height score
-    z = asset.data.root_link_pos_w[:, 2]
+    z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2], nan=0.0)
     h_score = torch.exp(-((z - target_height) / height_std).pow(2))
 
     # Upright trunk orientation score (gx² + gy²)

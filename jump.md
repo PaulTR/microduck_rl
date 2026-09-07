@@ -35,20 +35,32 @@ Run a quick CPU/GPU smoke test to confirm environment construction and stepping:
 uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 64 --agent.max_iterations 5
 ```
 
-### 3. Full Training Run (4096 envs)
-Train the jump policy with 4096 parallel environments (takes ~15–20 minutes for 3000 iterations):
+### 3. Training Run (4096 envs, 1200 iterations)
+Train the jump policy with 4096 parallel environments (configured for 1200 iterations with checkpoints every 100 iterations):
 ```bash
 uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 ```
 
-### 4. Export to ONNX
-Export the trained checkpoint (baking the observation normalizer into the ONNX graph):
+### 4. Early Checkpoint Testing (Don't wait for all iterations!)
+Checkpoints are saved every 100 iterations (`logs/microduck_jump/<date_time>/checkpoints/model_*.pt`).
+You can export and test an early checkpoint (e.g. after 200–300 iterations, ~10–15 min) while training continues:
 ```bash
-uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity>/mjlab_microduck/<run_id>
-# Output: logs/microduck_jump/<date_time>/exported/policy.onnx
+# Export specific checkpoint (e.g. model_300.pt) from local logs:
+uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --checkpoint logs/microduck_jump/<run_dir>/checkpoints/model_300.pt
+
+# Or export from wandb:
+uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity>/mjlab_microduck/<run_id> --checkpoint 300
 ```
 
-### 5. Deployment Rehearsal & Testing
+### 5. What to Check in WandB at Iteration 100–200
+Open the wandb run to verify the policy is discovering the jump:
+- `Episode_Reward/jump_trajectory_tracking`: climbing steadily towards ~4–5.
+- `Episode_Reward/jump_push_velocity`: rising above 0.5 (indicates pushing floor during extension).
+- `Episode_Reward/jump_airborne`: rising above 0.5 (indicates feet leaving ground).
+- `Episode_Reward/jump_yaw_rate`: near 0.0 (confirms NO spinning).
+- `Episode_Reward/head_posture`: near 0.0 (confirms NO chin-tucking or ball-curling).
+
+### 6. Deployment Rehearsal & Testing
 Run the jump policy standalone with the BAM M6 actuator model:
 ```bash
 uv run scripts/infer_policy.py --jump <path_to_exported_policy.onnx> --new-cmd-obs

@@ -437,8 +437,8 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
 
 MicroduckJumpRlCfg = RslRlOnPolicyRunnerCfg(
     num_steps_per_env=24,
-    max_iterations=3000,
-    save_interval=250,
+    max_iterations=1200,
+    save_interval=100,
     experiment_name="microduck_jump",
     run_name="microduck_jump",
     wandb_project="mjlab_microduck",
