@@ -217,7 +217,7 @@ class PolicyInference:
                  sitstand_onnx_path=None,
                  kick_left_onnx_path=None, kick_right_onnx_path=None,
                  roulade_onnx_path=None, jump_onnx_path=None,
-                 kick_duration=3.0, roulade_duration=2.0, jump_duration=2.0):
+                 kick_duration=3.0, roulade_duration=2.0, jump_duration=1.2):
         self.bam_ctrl = bam_ctrl  # bam.mujoco.MujocoController (None = legacy position actuators)
         self.model = model
         self.data = data

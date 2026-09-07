@@ -48,8 +48,8 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 # Episode duration and targets
 EPISODE_LENGTH_S = 1.2
 STAND_Z          = 0.115
-CROUCH_Z         = 0.080
-APEX_Z           = 0.170
+CROUCH_Z         = 0.100
+APEX_Z           = 0.150
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 import mjlab.envs.mdp as base_mdp
@@ -150,19 +150,19 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     # ── Rewards: 4-Phase Biomechanical Jump Cycle (Seamless Stand at Boundaries) ──
     # Phase mapping over phi ∈ [0, 1):
     #   • [0.00, 0.08]: Ready Stand (HOME pose, z = 0.115 m)
-    #   • [0.08, 0.28]: Countermovement Crouch (z -> 0.080 m)
+    #   • [0.08, 0.28]: Countermovement Crouch (z -> 0.100 m stable dip)
     #   • [0.25, 0.48]: Explosive Push-Off (vz > 0, weight 8.0)
-    #   • [0.45, 0.70]: High Ballistic Flight (target z -> 0.170 m, lift-scaled airborne)
+    #   • [0.45, 0.70]: High Ballistic Flight (target z -> 0.150 m, lift-scaled airborne)
     #   • [0.68, 1.00]: Landing, Damping, and Stable Stand (continuous across wrap to [0.00, 0.08])
 
-    # 1. Phase 1 — Crouch / Countermovement (phi ∈ [0.08, 0.28]): Lower CoM with flat feet and upright trunk
+    # 1. Phase 1 — Crouch / Countermovement (phi ∈ [0.08, 0.28]): Lower CoM to stable dip with flat feet and upright trunk
     cfg.rewards["jump_crouch"] = RewardTermCfg(
         func=microduck_mdp.jump_crouch_composite,
         weight=4.0,
         params={
             "target_height": CROUCH_Z,
             "height_std": 0.015,
-            "upright_std": 0.20,
+            "upright_std": 0.15,
             "sensor_name": feet_ground_cfg.name,
             "crouch_start": 0.08,
             "crouch_end": 0.28,
@@ -190,7 +190,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             "sensor_name": feet_ground_cfg.name,
             "flight_start": 0.45,
             "flight_end": 0.70,
-            "min_flight_height": 0.120,
+            "min_flight_height": 0.115,
             "target_apex": APEX_Z,
             "command_name": "twist",
         },
@@ -202,7 +202,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         weight=6.0,
         params={
             "target_height": APEX_Z,
-            "std": 0.030,
+            "std": 0.025,
             "flight_start": 0.45,
             "flight_end": 0.70,
             "command_name": "twist",
@@ -216,7 +216,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         params={
             "target_height": STAND_Z,
             "height_std": 0.020,
-            "upright_std": 0.20,
+            "upright_std": 0.15,
             "pose_std": 0.30,
             "stand_start": 0.68,
             "stand_end": 0.08,
@@ -237,41 +237,35 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     )
 
     # ── Anti-Exploit & Stability Penalties ─────────────────────────────────────
-    # 5. Head posture penalty: locks servos 5–8 to HOME pose to eliminate head-bobbing
+    # 5. Head posture penalty: heavily locks servos 5–8 to HOME pose to eliminate head-curling / head-bobbing
     cfg.rewards["head_posture"] = RewardTermCfg(
         func=microduck_mdp.head_posture_penalty,
-        weight=-2.0,
+        weight=-10.0,
     )
 
-    # 6. Anti-pitch rotation penalty: penalizes ω_y² to prevent backwards/forwards tilt in flight and landing
-    cfg.rewards["jump_pitch_rate"] = RewardTermCfg(
-        func=microduck_mdp.jump_pitch_rate_penalty,
-        weight=-2.5,
-    )
-
-    # 7. Anti-spin penalty: heavily penalize yaw angular velocity (ω_z²)
+    # 6. Anti-spin penalty: heavily penalize yaw angular velocity (ω_z²)
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
         weight=-3.0,
     )
 
-    # 8. In-place constraints: strictly penalize horizontal velocity and drift
+    # 7. In-place constraints: strictly penalize horizontal velocity and drift
     cfg.rewards["jump_horizontal_vel"] = RewardTermCfg(
         func=microduck_mdp.jump_horizontal_velocity_penalty,
-        weight=-3.0,
+        weight=-4.0,
     )
     cfg.rewards["jump_horizontal_drift"] = RewardTermCfg(
         func=microduck_mdp.jump_horizontal_drift_penalty,
         weight=-4.0,
     )
 
-    # 9. Verticality penalty: keep body vertical (gx² + gy²)
+    # 8. Verticality penalty: keep body vertical (gx² + gy²)
     cfg.rewards["jump_verticality"] = RewardTermCfg(
         func=microduck_mdp.jump_verticality_penalty,
-        weight=-3.0,
+        weight=-8.0,
     )
 
-    # 10. Landing settle damping: damps residual velocity to a complete stop upon touchdown
+    # 9. Landing settle damping: damps residual velocity to a complete stop upon touchdown
     cfg.rewards["jump_landing_damping"] = RewardTermCfg(
         func=microduck_mdp.jump_landing_damping,
         weight=-2.0,
@@ -381,7 +375,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=base_mdp.bad_orientation,
         params={
-            "limit_angle": 0.35,  # ~20 deg tilt limit (strict: jump must stay vertical)
+            "limit_angle": 0.28,  # ~16 deg tilt limit (strict: jump must stay strictly vertical)
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
     )

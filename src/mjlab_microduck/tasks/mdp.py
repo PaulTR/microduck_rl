@@ -7194,8 +7194,8 @@ def roulade_lateral_velocity_penalty(
 
 JUMP_PERIOD: float = 1.2
 JUMP_STAND_Z: float = 0.115
-JUMP_CROUCH_Z: float = 0.080
-JUMP_TARGET_APEX_Z: float = 0.170
+JUMP_CROUCH_Z: float = 0.100
+JUMP_TARGET_APEX_Z: float = 0.150
 
 
 class JumpPhaseCommand(UniformVelocityCommand):
@@ -7289,14 +7289,14 @@ def jump_crouch_composite(
     env: ManagerBasedRlEnv,
     target_height: float = JUMP_CROUCH_Z,
     height_std: float = 0.015,
-    upright_std: float = 0.20,
+    upright_std: float = 0.15,
     sensor_name: str = "feet_ground_contact",
     crouch_start: float = 0.08,
     crouch_end: float = 0.28,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards lowering CoM into a stable crouch while keeping feet flat and trunk upright."""
+    """Rewards lowering CoM into a stable crouch while keeping feet flat, head locked, and trunk upright."""
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, crouch_start, crouch_end)
     asset: Entity = env.scene[asset_cfg.name]
@@ -7305,10 +7305,17 @@ def jump_crouch_composite(
     z = asset.data.root_link_pos_w[:, 2]
     h_score = torch.exp(-((z - target_height) / height_std).pow(2))
 
-    # Upright trunk score
-    quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    u_score = torch.exp(-tilt_sq / (upright_std * upright_std))
+    # Strict upright trunk gate (gx² + gy² < 0.035, tilt < 10.7°)
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    upright_gate = (tilt_sq < 0.035).float()
+
+    # Head lock gate: head servos 5–8 must remain at HOME pose (error² < 0.03)
+    joint_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    head_ids = [5, 6, 7, 8]
+    head_err_sq = (joint_pos[:, head_ids] - default_pos[:, head_ids]).pow(2).sum(dim=-1)
+    head_gate = (head_err_sq < 0.03).float()
 
     # Both feet grounded
     feet_down = torch.ones(env.num_envs, device=env.device)
@@ -7319,7 +7326,7 @@ def jump_crouch_composite(
             contacts = found.view(found.shape[0], -1)[:, :2] > 0
             feet_down = (contacts[:, 0] & contacts[:, 1]).float()
 
-    return window * (h_score * u_score * feet_down)
+    return window * (h_score * upright_gate * head_gate * feet_down)
 
 
 def jump_push_velocity(
@@ -7332,8 +7339,8 @@ def jump_push_velocity(
 ) -> torch.Tensor:
     """Rewards positive vertical velocity (vz > 0) while pushing against the ground.
 
-    Dense monotonic reward: the harder and faster the legs extend against the floor,
-    the higher the reward. Strictly zero if robot is tilted or airborne.
+    Dense monotonic reward: the harder and faster the legs extend straight up against the floor,
+    the higher the reward. Strictly zero if robot tilts, curls head, moves horizontally, or is airborne.
     """
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, push_start, push_end)
@@ -7345,10 +7352,21 @@ def jump_push_velocity(
     # Reward positive vz up to ~1.2 m/s
     vz_score = torch.clamp(vz / 0.75, min=0.0, max=1.5)
 
-    # Must be upright (tilt < 18 deg)
-    quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright_gate = (tilt_sq < 0.10).float()
+    # Must be upright (gx² + gy² < 0.035, tilt < 10.7°)
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    upright_gate = (tilt_sq < 0.035).float()
+
+    # Head lock gate
+    joint_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    head_ids = [5, 6, 7, 8]
+    head_err_sq = (joint_pos[:, head_ids] - default_pos[:, head_ids]).pow(2).sum(dim=-1)
+    head_gate = (head_err_sq < 0.03).float()
+
+    # Must have minimal horizontal velocity (purely vertical push: vx² + vy² < 0.04)
+    horiz_v_sq = v_w[:, 0].pow(2) + v_w[:, 1].pow(2)
+    horiz_gate = (horiz_v_sq < 0.04).float()
 
     # Must still have foot contact (pushing against the ground)
     feet_down = torch.ones(env.num_envs, device=env.device)
@@ -7359,7 +7377,7 @@ def jump_push_velocity(
             contacts = found.view(found.shape[0], -1)[:, :2] > 0
             feet_down = (contacts[:, 0] | contacts[:, 1]).float()
 
-    return window * vz_score * upright_gate * feet_down
+    return window * vz_score * upright_gate * head_gate * horiz_gate * feet_down
 
 
 def jump_airborne(
@@ -7367,12 +7385,12 @@ def jump_airborne(
     sensor_name: str = "feet_ground_contact",
     flight_start: float = 0.45,
     flight_end: float = 0.70,
-    min_flight_height: float = 0.120,
+    min_flight_height: float = 0.115,
     target_apex: float = JUMP_TARGET_APEX_Z,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward when both feet are airborne, strictly gated on upright trunk,
+    """Reward when both feet are airborne, strictly gated on upright trunk and rigid head,
     SCALED CONTINUOUSLY BY LIFT HEIGHT so higher jumps earn proportionally more!
     """
     phase = jump_phase_from_command(env, command_name)
@@ -7388,24 +7406,30 @@ def jump_airborne(
     contacts = found.view(found.shape[0], -1)[:, :2] > 0
     both_feet_airborne = (~contacts[:, 0] & ~contacts[:, 1]).float()
 
-    # 2. Upright trunk gate (tilt < 15 deg: tilt_sq < 0.07)
+    # 2. Strict upright trunk gate (gx² + gy² < 0.035, tilt < 10.7°)
     asset: Entity = env.scene[asset_cfg.name]
-    quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright_gate = (tilt_sq < 0.07).float()
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    upright_gate = (tilt_sq < 0.035).float()
 
-    # 3. Continuous lift scaling:
-    # A 5mm hop gets ~0.10. A 50mm jump to 0.170m gets 1.0. Higher gets up to 1.5.
+    # 3. Head lock gate
+    joint_pos = _servo_joint_pos(env, asset)
+    default_pos = _servo_default_joint_pos(env, asset)
+    head_ids = [5, 6, 7, 8]
+    head_err_sq = (joint_pos[:, head_ids] - default_pos[:, head_ids]).pow(2).sum(dim=-1)
+    head_gate = (head_err_sq < 0.03).float()
+
+    # 4. Continuous lift scaling above standing height (0.115 m)
     z = asset.data.root_link_pos_w[:, 2]
     lift_scale = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=1.5)
 
-    return window * both_feet_airborne * upright_gate * lift_scale
+    return window * both_feet_airborne * upright_gate * head_gate * lift_scale
 
 
 def jump_apex_height(
     env: ManagerBasedRlEnv,
     target_height: float = JUMP_TARGET_APEX_Z,
-    std: float = 0.030,
+    std: float = 0.025,
     flight_start: float = 0.45,
     flight_end: float = 0.70,
     command_name: str = "twist",
@@ -7418,10 +7442,10 @@ def jump_apex_height(
     z = asset.data.root_link_pos_w[:, 2]
     score = torch.exp(-((z - target_height) / std).pow(2))
 
-    # Upright gate (tilt < 20 deg)
-    quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
-    upright_gate = (tilt_sq < 0.12).float()
+    # Strict upright gate (gx² + gy² < 0.035)
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    upright_gate = (tilt_sq < 0.035).float()
 
     return window * score * upright_gate
 
@@ -7430,7 +7454,7 @@ def jump_stand_composite(
     env: ManagerBasedRlEnv,
     target_height: float = JUMP_STAND_Z,
     height_std: float = 0.020,
-    upright_std: float = 0.20,
+    upright_std: float = 0.15,
     pose_std: float = 0.30,
     stand_start: float = 0.68,
     stand_end: float = 0.08,
@@ -7448,16 +7472,15 @@ def jump_stand_composite(
     z = asset.data.root_link_pos_w[:, 2]
     h_score = torch.exp(-((z - target_height) / height_std).pow(2))
 
-    # Upright trunk orientation score
-    quat = asset.data.root_link_quat_w
-    tilt_sq = 2.0 * (quat[:, 1].pow(2) + quat[:, 2].pow(2))
+    # Strict upright trunk orientation score
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
     u_score = torch.exp(-tilt_sq / (upright_std * upright_std))
 
-    # Leg joint posture score (HOME standing pose)
+    # Joint posture score across all 14 servos (HOME standing pose)
     joint_pos = _servo_joint_pos(env, asset)
     default_pos = _servo_default_joint_pos(env, asset)
-    leg_ids = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
-    p_score = torch.exp(-((joint_pos[:, leg_ids] - default_pos[:, leg_ids]) / pose_std).pow(2)).mean(dim=-1)
+    p_score = torch.exp(-((joint_pos - default_pos) / pose_std).pow(2)).mean(dim=-1)
 
     return window * (h_score * u_score * p_score)
 

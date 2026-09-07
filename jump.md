@@ -1,54 +1,53 @@
-# Microduck Two-Legged Vertical Jump Policy (Jump-3)
+# Microduck Strictly Vertical Two-Legged Jump (Jump-3)
 
-A physics-grounded, two-legged vertical jump in place with high explosive lift and balanced landing.
-The robot starts in an upright stand ($z = 0.115$ m), dips into a crouch ($z = 0.080$ m), drives upward explosively ($v_z > 0$, weight 8.0), achieves high ballistic flight (target apex $z \approx 0.170$ m, lift-scaled airborne bonus), and lands cleanly on both feet directly into a vertical standing posture ($z \approx 0.115$ m) at $(x=0, y=0)$ without falling backwards or spinning.
+A physics-grounded, two-legged vertical jump in place designed to keep Microduck strictly vertical throughout all phases: stable countermovement dip, explosive vertical push-off, upright ballistic flight, and balanced two-foot landing.
 
 ---
 
-## 1. Key Physics & Biomechanical Upgrades
+## 1. Root Causes & Physics Solutions
 
-### A. Maximizing Jump Height & Air Time
-1. **Continuous Lift-Scaled Airborne Reward**:
-   - The previous binary 0/1 airborne bonus paid 100% of the reward for a 2 mm hop. PPO naturally settled on a tiny hop to minimize energy and avoid tilt risk.
-   - **Fix**: The airborne bonus is now scaled continuously by lift height:
-     $$\text{score} = \text{both\_feet\_airborne} \times \text{upright\_gate} \times \text{clamp}\left(\frac{z - 0.120}{0.050}, 0.0, 1.5\right)$$
-     A 5 mm hop earns only $10\%$, while a 55 mm leap earns $100\%$ (up to $150\%$ for higher). Higher jumps earn up to **15× more reward**.
-2. **Aggressive Push-Off Velocity ($v_z > 0$)**:
-   - `jump_push_velocity` weight boosted to **8.0** with reward scaling up to $1.2\text{ m/s}$. The harder the legs drive into the floor, the larger the payout.
-3. **Higher Apex Target**:
-   - `APEX_Z` increased from $0.155\text{ m}$ to **$0.170\text{ m}$** (a $5.5\text{ cm}$ vertical lift above standing).
-4. **Low Action-Rate Attempt Tax**:
-   - `action_rate_l2` starts at `-0.003` so explosive acceleration is not throttled during push-off.
+### A. Preventing Head Curling into a Ball
+- **Root Cause**: Microduck's head is **38% of total robot mass**. When the legs crouched, the policy discovered it could tuck its chin into its chest (servos 5–8: `neck_pitch`, `head_pitch`) to shift mass forward without extending its legs.
+- **Physics Solution**:
+  1. **Rigid Head Lock**: `head_posture_penalty` weight boosted to **`-10.0`** (penalizes $\sum (q_{\text{head}} - q_{\text{head, home}})^2$).
+  2. **Head Lock Gate**: `jump_crouch`, `jump_push_velocity`, and `jump_airborne` now include a strict head gate ($\sum (q_{\text{head}} - q_{\text{head, default}})^2 < 0.03$). Any head movement immediately zeros out the positive rewards. The head remains locked upright in the HOME posture.
 
-### B. Eliminating Backward Landing Falls
-1. **Seamless Circular Phase Wrap**:
-   - Twist command is $[ \cos(2\pi\phi), \sin(2\pi\phi), 0 ]$. At $\phi = 1.0$, the embedding is $[1.0, 0.0]$, which is identical to $\phi = 0.0$.
-   - When $\phi = 0$ was crouch and $\phi = 1$ was stand, the policy received $[1.0, 0.0]$ right at landing and immediately bent its knees to crouch again, collapsing backwards onto its back.
-   - **Fix**: Re-centered the cycle so **both $\phi = 0.0$ and $\phi = 1.0$ command nominal STAND**! Holding $\phi = 1.0$ after the jump now commands the policy to stand upright and balance stably.
-2. **Anti-Pitch Rate Penalty ($\omega_y^2$)**:
-   - `jump_pitch_rate` (weight `-2.5`) heavily penalizes body pitch angular velocity during push-off and flight. This prevents the robot from rotating backward in mid-air.
-3. **Landing Damping**:
-   - `jump_landing_damping` (weight `-2.0`) in $\phi \in [0.78, 0.05]$ penalizes residual linear and angular velocity upon touchdown, bringing the body to a stable rest.
+### B. Preventing Backward Falls onto the Back
+- **Root Cause**:
+  1. `CROUCH_Z = 0.080` m was physically too deep for Microduck's small 5.4 cm feet (heels at $-20$ mm, toes at $+34$ mm). Dropping 35 mm shifted the Center of Mass behind the ankle axis, making backward toppling unavoidable.
+  2. The previous pitch rate penalty (`jump_pitch_rate = -2.5` on $\omega_y^2$) taxed rapid leg extension during push-off, leaving the robot off-balance without vertical thrust.
+- **Physics Solution**:
+  1. **Stable Countermovement Dip ($z = 0.100$ m)**: A 15 mm dip from stand ($0.115$ m down to $0.100$ m). Keeps feet completely flat, CoM centered over the ankle axis, trunk vertical ($0.2^\circ$), and joints within their maximum torque band.
+  2. **Removal of Pitch Rate Penalty**: Leg push-off is no longer taxed for rotational speed.
+  3. **Strict Verticality Penalty & Gate**: `jump_verticality` boosted to **`-8.0`** ($g_x^2 + g_y^2$). All positive rewards strictly require tilt $< 10.7^\circ$ ($g_x^2 + g_y^2 < 0.035$).
+  4. **Strict Orientation Termination**: `fell_over` `limit_angle` tightened from $0.35$ (~20°) to **`0.28`** (~16°). Any forward or backward topple terminates the episode immediately.
+
+### C. Purely Vertical Push-Off ($v_z > 0$)
+- In `jump_push_velocity`, upward velocity $v_z$ is rewarded only when:
+  - Both feet are pushing against the ground.
+  - The trunk is strictly upright (tilt $< 10.7^\circ$).
+  - The head is locked in HOME posture.
+  - Horizontal velocity is minimal ($v_x^2 + v_y^2 < 0.04$, no lunging or spinning).
 
 ---
 
 ## 2. 5-Phase Jump Timeline ($T = 1.2$ s, 60 steps @ 50 Hz)
 
-| Phase | Phase $\phi$ | Duration | Objective | Key Rewards |
+| Phase | Phase $\phi$ | Duration | Objective | Key Rewards / Gates |
 |---|---|---|---|---|
 | **1. Ready Stand** | $[0.00, 0.08]$ | $0.10$ s | Stable upright stand in HOME pose ($z = 0.115$ m) | `jump_stand` (6.0), `jump_feet_grounded` (2.5) |
-| **2. Crouch** | $[0.08, 0.28]$ | $0.24$ s | Lower CoM to $z = 0.080$ m with flat feet | `jump_crouch` (4.0) |
-| **3. Push-Off** | $[0.25, 0.48]$ | $0.28$ s | Explosively drive legs straight up ($v_z > 0$) | `jump_push_velocity` (8.0) |
-| **4. Flight** | $[0.45, 0.70]$ | $0.30$ s | Reach apex $z \approx 0.170$ m in the air upright | `jump_airborne` (6.0, lift-scaled), `jump_apex_height` (6.0) |
+| **2. Crouch Dip** | $[0.08, 0.28]$ | $0.24$ s | Lower CoM to $z = 0.100$ m with flat feet & upright trunk | `jump_crouch` (4.0, head gate, tilt gate) |
+| **3. Push-Off** | $[0.25, 0.48]$ | $0.28$ s | Explosively drive straight up ($v_z > 0$) | `jump_push_velocity` (8.0, vertical gate, head gate) |
+| **4. Flight** | $[0.45, 0.70]$ | $0.30$ s | Reach apex $z \approx 0.150$ m upright in the air | `jump_airborne` (6.0, lift-scaled), `jump_apex_height` (6.0) |
 | **5. Land & Settle** | $[0.68, 1.00]$ | $0.38$ s | Touch down on two feet into HOME stand ($z = 0.115$ m) | `jump_stand` (6.0), `jump_landing_damping` (-2.0) |
 
 ---
 
 ## 3. Training & Playback
 
-### Full Training (4096 envs on Linux GPU or HF Jobs)
+### Pull Updates & Train (on Linux GPU or HF Jobs)
 ```bash
-# On your Linux training machine:
+# On your Linux GPU machine:
 git pull
 uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096
 # Or on Hugging Face Jobs:
@@ -60,17 +59,9 @@ uv run train Mjlab-Jump-Flat-MicroDuck --env.scene.num-envs 4096 --hf-jobs
 uv run scripts/export.py Mjlab-Jump-Flat-MicroDuck --wandb-run-path <entity/project/run_id> -o jump.onnx
 ```
 
-### Playback & Stand Options
-You can run the jump policy in two ways:
-
-1. **Standalone (Jump Policy Balances Itself)**:
-   ```bash
-   uv run scripts/infer_policy.py --jump jump.onnx --new-cmd-obs
-   ```
-   The policy completes the jump and automatically settles and balances in the upright standing pose at $\phi = 1.0$.
-
-2. **Chained Handover to a Separate Standing Policy**:
-   ```bash
-   uv run scripts/infer_policy.py --jump jump.onnx --standing stand.onnx --new-cmd-obs
-   ```
-   At the end of the jump cycle ($1.2$ s), `infer_policy.py` automatically hands control over to your standing policy to maintain balance.
+### Playback in MuJoCo Viewer
+```bash
+# Standalone execution:
+uv run scripts/infer_policy.py --jump jump.onnx --new-cmd-obs
+```
+The policy completes the 1.2 s vertical jump cycle and automatically holds balance in the upright standing pose at $\phi = 1.0$.
