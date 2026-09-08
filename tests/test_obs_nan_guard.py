@@ -135,3 +135,33 @@ def test_standup_env_is_also_guarded():
     assert cfg.terminations["nan_state"].params.get("sensor_names"), (
         "standup nan_state no longer watches contact forces"
     )
+
+
+def test_jump_env_is_also_guarded():
+    """Jump policy lands dynamically from apex; critic obs and nan_state must survive contact spikes."""
+    from mjlab_microduck.tasks.microduck_jump_env_cfg import (
+        make_microduck_jump_env_cfg,
+    )
+
+    cfg = make_microduck_jump_env_cfg()
+    terms = cfg.observations["critic"].terms
+    for name in ("foot_contact_forces", "foot_air_time"):
+        assert terms[name].func.__name__.endswith("_safe"), (
+            f"jump critic/{name} lost its NaN guard"
+        )
+    assert cfg.terminations["nan_state"].params.get("sensor_names"), (
+        "jump nan_state no longer watches contact forces"
+    )
+    assert cfg.observations["actor"].nan_policy == "sanitize", (
+        "jump actor observation group must sanitize NaN/Inf"
+    )
+    assert cfg.observations["critic"].nan_policy == "sanitize", (
+        "jump critic observation group must sanitize NaN/Inf"
+    )
+
+
+def test_observation_manager_compute_group_is_nan_safe():
+    """Verify Patch 5: ObservationManager.compute_group sanitizes any NaN/Inf observation tensor."""
+    from mjlab.managers.observation_manager import ObservationManager
+
+    assert ObservationManager.compute_group.__name__ == "_nan_safe_obs_compute_group"

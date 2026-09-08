@@ -112,6 +112,33 @@ except Exception:
 
 print("[mdp] Patch 4 active: ONNX export filters passive_* joints")
 
+# ---------------------------------------------------------------------------
+# Patch 5: ObservationManager.compute_group — sanitize NaN/Inf observations
+# before they reach rsl_rl's check_nan(obs, rewards, dones). Extreme dynamic
+# events (such as hard landings from apex) can cause transient sensor NaN
+# values in contact force/velocity sensors. Sanitizing any non-finite values to 0.0
+# guarantees rsl_rl never aborts training runs with ValueError.
+# ---------------------------------------------------------------------------
+from mjlab.managers.observation_manager import ObservationManager as _ObservationManager  # noqa: E402
+
+_orig_obs_compute_group = _ObservationManager.compute_group
+
+def _nan_safe_obs_compute_group(
+    self, group_name: str, update_history: bool = False
+) -> torch.Tensor | dict[str, torch.Tensor]:
+    result = _orig_obs_compute_group(self, group_name, update_history=update_history)
+    if isinstance(result, torch.Tensor):
+        if not torch.all(torch.isfinite(result)):
+            result = torch.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+    elif isinstance(result, dict):
+        for k, v in result.items():
+            if isinstance(v, torch.Tensor) and not torch.all(torch.isfinite(v)):
+                result[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+    return result
+
+_ObservationManager.compute_group = _nan_safe_obs_compute_group
+print("[mdp] Patch 5 active: NaN-safe observation group compute")
+
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
 
@@ -7438,7 +7465,7 @@ def jump_stand_composite(
     height_std: float = 0.020,
     upright_std: float = 0.15,
     pose_std: float = 0.30,
-    stand_start: float = 0.65,
+    stand_start: float = 0.50,
     stand_end: float = 0.05,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,

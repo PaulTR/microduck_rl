@@ -184,7 +184,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.65, 0.05] wrap), GATED on having jumped
+    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.50, 0.05] wrap), GATED on having jumped
     # lift_gate requires max_z > 0.126 m during flight. Standing still earns strictly 0.0.
     cfg.rewards["jump_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_stand_composite,
@@ -194,7 +194,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             "height_std": 0.020,
             "upright_std": 0.15,
             "pose_std": 0.30,
-            "stand_start": 0.65,
+            "stand_start": 0.50,
             "stand_end": 0.05,
             "command_name": "twist",
         },
@@ -251,6 +251,21 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     del cfg.observations["critic"].terms["foot_height"]
     del cfg.observations["actor"].terms["height_scan"]
     del cfg.observations["critic"].terms["height_scan"]
+
+    # The critic's sensor-derived terms are the one obs path nan_state cannot
+    # protect (it checks joint + root state; these read raycast/contact sensor
+    # data, which MuJoCo can return non-finite for while the state is still clean).
+    # Use _safe wrappers to prevent contact impulse spikes from injecting NaNs.
+    for _term, _safe in (
+        ("foot_contact_forces", microduck_mdp.foot_contact_forces_safe),
+        ("foot_air_time", microduck_mdp.foot_air_time_safe),
+    ):
+        if _term in cfg.observations["critic"].terms:
+            cfg.observations["critic"].terms[_term].func = _safe
+
+    # Observation group NaN sanitization: replaces any transient NaN/Inf with 0.0
+    for grp in ("actor", "critic"):
+        cfg.observations[grp].nan_policy = "sanitize"
 
     gravity_term_name = "projected_gravity"
     cfg.observations["actor"].terms[gravity_term_name] = deepcopy(
@@ -331,6 +346,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.terminations["nan_state"] = TerminationTermCfg(
         func=microduck_mdp.robot_state_is_nan,
         time_out=False,
+        params={"sensor_names": (feet_ground_cfg.name,)},
     )
 
     # ── Events: spawn robot standing stably with feet flat on ground ──────────

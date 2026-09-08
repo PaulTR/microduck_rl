@@ -61,6 +61,7 @@ def test_jump_rewards_and_penalties_signs():
     assert "jump_push_velocity" in r and r["jump_push_velocity"].weight > 0
     assert "jump_airborne" in r and r["jump_airborne"].weight > 0
     assert "jump_stand" in r and r["jump_stand"].weight > 0
+    assert r["jump_stand"].params["stand_start"] == 0.50
 
     # Penalties (must be negative)
     assert "action_rate_l2" in r and r["action_rate_l2"].weight < 0
@@ -79,6 +80,18 @@ def test_jump_terminations():
     assert "fell_over" in terms
     assert terms["fell_over"].params["limit_angle"] == 1.0  # ~57 degrees
     assert "nan_state" in terms
+    assert terms["nan_state"].params.get("sensor_names") == ("feet_ground_contact",)
+
+
+def test_jump_obs_nan_sanitization():
+    """Verify observation groups are configured with nan_policy='sanitize' and safe critic terms."""
+    cfg = make_microduck_jump_env_cfg()
+    assert cfg.observations["actor"].nan_policy == "sanitize"
+    assert cfg.observations["critic"].nan_policy == "sanitize"
+
+    critic_terms = cfg.observations["critic"].terms
+    assert critic_terms["foot_contact_forces"].func.__name__ == "foot_contact_forces_safe"
+    assert critic_terms["foot_air_time"].func.__name__ == "foot_air_time_safe"
 
 
 def test_jump_reference_trajectory_continuity():
