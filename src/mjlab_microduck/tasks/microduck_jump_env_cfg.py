@@ -223,7 +223,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     # 8. Verticality penalty: keep body vertical (gx² + gy²)
     cfg.rewards["jump_verticality"] = RewardTermCfg(
         func=microduck_mdp.jump_verticality_penalty,
-        weight=-5.0,
+        weight=-12.0,
     )
 
     # ── Sim2real regularisers ─────────────────────────────────────────────────
@@ -340,9 +340,13 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=base_mdp.bad_orientation,
         params={
-            "limit_angle": 1.0,  # ~57 deg tilt limit (allows dynamic push & landing, cuts fallen states)
+            "limit_angle": 0.55,  # ~31.5 deg tilt limit (prevents pitching back onto butt)
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
+    )
+    cfg.terminations["butt_collapse"] = TerminationTermCfg(
+        func=microduck_mdp.root_height_below,
+        params={"min_height": 0.082},  # terminates if trunk drops below 8.2 cm (sitting on butt/collapsing)
     )
     cfg.terminations["nan_state"] = TerminationTermCfg(
         func=microduck_mdp.robot_state_is_nan,
