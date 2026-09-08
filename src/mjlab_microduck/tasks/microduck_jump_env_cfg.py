@@ -41,7 +41,7 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 
 # Episode duration and targets
 EPISODE_LENGTH_S = 1.2
-STAND_Z          = 0.115
+STAND_Z          = 0.114
 CROUCH_Z         = 0.100
 APEX_Z           = 0.150
 
@@ -129,14 +129,21 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             del cfg.rewards[name]
 
     # ── Rewards: 4-Phase Biomechanical Jump Cycle ─────────────────────────────
-    # 1. Continuous reference trajectory tracking: focused on 6 sagittal leg pitch joints
+    # 1. Kinematic reference trajectory tracking: active ONLY during crouch & push (phi in [0.06, 0.38])
+    # Outside this window, returns 0.0 so standing still cannot farm trajectory reward.
     cfg.rewards["jump_trajectory_tracking"] = RewardTermCfg(
         func=microduck_mdp.jump_trajectory_tracking,
-        weight=5.0,
-        params={"std": 0.20, "command_name": "twist"},
+        weight=4.0,
+        params={
+            "std": 0.12,
+            "window_start": 0.06,
+            "window_end": 0.38,
+            "command_name": "twist",
+        },
     )
 
     # 1b. Direct crouch dip: rewards lowering trunk by ~15 mm (phi ∈ [0.08, 0.24])
+    # Standing still (z >= STAND_Z) earns strictly 0.0.
     cfg.rewards["jump_crouch"] = RewardTermCfg(
         func=microduck_mdp.jump_crouch_depth,
         weight=4.0,
@@ -149,42 +156,45 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 2. Push-off vertical velocity: positive vz > 0 during explosive extension (phi ∈ [0.20, 0.40])
+    # 2. Push-off vertical velocity: positive vz > 0 during explosive extension (phi ∈ [0.20, 0.38])
+    # Standing still (vz <= 0) earns strictly 0.0.
     cfg.rewards["jump_push_velocity"] = RewardTermCfg(
         func=microduck_mdp.jump_push_velocity,
-        weight=8.0,
+        weight=10.0,
         params={
             "push_start": 0.20,
-            "push_end": 0.40,
+            "push_end": 0.38,
             "target_vz": 0.40,
             "command_name": "twist",
         },
     )
 
-    # 3. Airborne flight: trunk height above ground (phi ∈ [0.35, 0.70]), scaled by apex lift height
+    # 3. Airborne flight: trunk height above ground (phi ∈ [0.30, 0.65]), scaled by apex lift height
+    # Requires z > 0.126 m (1.2 cm above settled stand). Standing still earns strictly 0.0.
     cfg.rewards["jump_airborne"] = RewardTermCfg(
         func=microduck_mdp.jump_airborne,
-        weight=8.0,
+        weight=10.0,
         params={
             "sensor_name": feet_ground_cfg.name,
-            "flight_start": 0.35,
-            "flight_end": 0.70,
-            "min_flight_height": STAND_Z + 0.002,
+            "flight_start": 0.30,
+            "flight_end": 0.65,
+            "min_flight_height": 0.126,
             "target_apex": APEX_Z,
             "command_name": "twist",
         },
     )
 
-    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.70, 0.05] wrap), GATED on having jumped
+    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.65, 0.05] wrap), GATED on having jumped
+    # lift_gate requires max_z > 0.126 m during flight. Standing still earns strictly 0.0.
     cfg.rewards["jump_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_stand_composite,
-        weight=5.0,
+        weight=6.0,
         params={
             "target_height": STAND_Z,
             "height_std": 0.020,
             "upright_std": 0.15,
             "pose_std": 0.30,
-            "stand_start": 0.70,
+            "stand_start": 0.65,
             "stand_end": 0.05,
             "command_name": "twist",
         },
@@ -197,10 +207,10 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         weight=-6.0,
     )
 
-    # 6. Anti-spin penalty: heavily penalize yaw angular velocity (ω_z²)
+    # 6. Anti-spin penalty: penalize yaw angular velocity (ω_z²)
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
-        weight=-3.0,
+        weight=-1.5,
     )
 
     # 7. In-place constraint: strictly penalize horizontal velocity (vx² + vy²)

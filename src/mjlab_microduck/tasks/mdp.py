@@ -7310,12 +7310,19 @@ def jump_reference_qpos(phase: torch.Tensor, default_pos: torch.Tensor) -> torch
 
 def jump_trajectory_tracking(
     env: ManagerBasedRlEnv,
-    std: float = 0.20,
+    std: float = 0.12,
+    window_start: float = 0.06,
+    window_end: float = 0.38,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Dense Gaussian tracking focused on the 6 sagittal leg pitch joints (knees, hips, ankles)."""
+    """Dense Gaussian tracking of crouch and push leg pitch angles.
+
+    Active ONLY during crouch and push (phi in [0.06, 0.38]).
+    Outside this window, returns 0.0 so standing still cannot farm trajectory reward.
+    """
     phase = jump_phase_from_command(env, command_name)  # (N,)
+    window = _jump_phase_window(phase, window_start, window_end)
     asset: Entity = env.scene[asset_cfg.name]
     joint_pos = _servo_joint_pos(env, asset)            # (N, 14)
     default_pos = _servo_default_joint_pos(env, asset)  # (N, 14)
@@ -7326,14 +7333,15 @@ def jump_trajectory_tracking(
     pitch_ids = [2, 3, 4, 11, 12, 13]
     error = joint_pos[:, pitch_ids] - target_pos[:, pitch_ids]
     error_sq = error.pow(2).mean(dim=-1)
-    return torch.exp(-error_sq / (std * std))
+    tracking = torch.exp(-error_sq / (std * std))
+    return window * tracking
 
 
 def jump_crouch_depth(
     env: ManagerBasedRlEnv,
     crouch_start: float = 0.08,
     crouch_end: float = 0.24,
-    nominal_z: float = 0.120,
+    nominal_z: float = 0.114,
     target_dip: float = 0.015,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -7354,12 +7362,12 @@ def jump_crouch_depth(
 def jump_push_velocity(
     env: ManagerBasedRlEnv,
     push_start: float = 0.20,
-    push_end: float = 0.40,
+    push_end: float = 0.38,
     target_vz: float = 0.40,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards positive vertical velocity (vz > 0) during push-off window phi in [0.20, 0.40]."""
+    """Rewards positive vertical velocity (vz > 0) during push-off window phi in [0.20, 0.38]."""
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, push_start, push_end)
     asset: Entity = env.scene[asset_cfg.name]
@@ -7377,38 +7385,38 @@ def reset_jump_state(
     """Reset per-episode jump tracking state on episode reset."""
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
-    asset: Entity = env.scene[asset_cfg.name]
-    origin_z = env.scene.env_origins[env_ids, 2]
-    z = torch.nan_to_num(asset.data.root_link_pos_w[env_ids, 2] - origin_z, nan=0.0)
     if not hasattr(env, "_jump_max_z") or env._jump_max_z.shape[0] != env.num_envs:
         env._jump_max_z = torch.zeros(env.num_envs, device=env.device)
-    env._jump_max_z[env_ids] = z
+    env._jump_max_z[env_ids] = 0.0
 
 
 def jump_airborne(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
-    flight_start: float = 0.35,
-    flight_end: float = 0.70,
-    min_flight_height: float = 0.122,
+    flight_start: float = 0.30,
+    flight_end: float = 0.65,
+    min_flight_height: float = 0.126,
     target_apex: float = JUMP_TARGET_APEX_Z,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards apex flight height (z > 0.122 m above terrain origin) during flight window phi in [0.35, 0.70]."""
+    """Rewards apex flight height (z > 0.126 m above terrain origin) during flight window phi in [0.30, 0.65]."""
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, flight_start, flight_end)
     asset: Entity = env.scene[asset_cfg.name]
     origin_z = env.scene.env_origins[:, 2]
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
-    # Track maximum height achieved in this episode
-    if not hasattr(env, "_jump_max_z") or env._jump_max_z.shape[0] != env.num_envs:
-        env._jump_max_z = z.clone()
-    else:
-        env._jump_max_z = torch.maximum(env._jump_max_z, z)
+    # Track maximum height achieved strictly during push & flight (phi in [0.22, 0.65])
+    if hasattr(env, "_jump_max_z"):
+        in_jump = (phase >= 0.22) & (phase <= 0.65)
+        env._jump_max_z = torch.where(
+            in_jump,
+            torch.maximum(env._jump_max_z, z),
+            env._jump_max_z,
+        )
 
-    # Continuous lift scaling above standing height
+    # Continuous lift scaling above standing height (0.126 m is 1.2 cm above settled stand)
     lift = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=2.0)
 
     # Bonus if feet break contact
@@ -7419,18 +7427,18 @@ def jump_airborne(
         if found is not None and found.dim() > 1 and found.shape[-1] >= 2:
             contacts = found.view(found.shape[0], -1)[:, :2] > 0
             both_airborne = (~contacts[:, 0] & ~contacts[:, 1]).float()
-            bonus = 1.0 + 0.5 * both_airborne
+            bonus = 1.0 + 1.0 * both_airborne
 
     return window * lift * bonus
 
 
 def jump_stand_composite(
     env: ManagerBasedRlEnv,
-    target_height: float = JUMP_STAND_Z,
+    target_height: float = 0.114,
     height_std: float = 0.020,
     upright_std: float = 0.15,
     pose_std: float = 0.30,
-    stand_start: float = 0.70,
+    stand_start: float = 0.65,
     stand_end: float = 0.05,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -7442,9 +7450,9 @@ def jump_stand_composite(
     origin_z = env.scene.env_origins[:, 2]
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
-    # Gate: only reward stand if the robot actually achieved lift (max_z > 0.122 m)
+    # Gate: only reward stand if the robot actually achieved lift during the jump window
     max_z = getattr(env, "_jump_max_z", z)
-    lift_gate = torch.clamp((max_z - 0.122) / 0.008, min=0.0, max=1.0)
+    lift_gate = torch.clamp((max_z - 0.126) / 0.010, min=0.0, max=1.0)
 
     h_score = torch.exp(-((z - target_height) / height_std).pow(2))
     g = asset.data.projected_gravity_b
