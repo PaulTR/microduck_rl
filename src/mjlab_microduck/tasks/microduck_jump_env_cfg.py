@@ -129,24 +129,25 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             del cfg.rewards[name]
 
     # ── Rewards: 4-Phase Biomechanical Jump Cycle ─────────────────────────────
-    # 1. Kinematic reference trajectory tracking: active ONLY during crouch & push (phi in [0.06, 0.38])
-    # Outside this window, returns 0.0 so standing still cannot farm trajectory reward.
+    # 1. Kinematic reference trajectory tracking: active during crouch & push (phi in [0.06, 0.38])
+    # and landing extension (phi in [0.38, 0.95] gated on lift_gate).
+    # std=0.25 gives a broad, dense gradient from step 0 guiding symmetric, balanced crouch & extension.
     cfg.rewards["jump_trajectory_tracking"] = RewardTermCfg(
         func=microduck_mdp.jump_trajectory_tracking,
-        weight=4.0,
+        weight=6.0,
         params={
-            "std": 0.12,
+            "std": 0.25,
             "window_start": 0.06,
             "window_end": 0.38,
             "command_name": "twist",
         },
     )
 
-    # 1b. Direct crouch dip: rewards lowering trunk by ~15 mm (phi ∈ [0.08, 0.24])
-    # Standing still (z >= STAND_Z) earns strictly 0.0.
+    # 1b. Supplemental crouch dip bonus: rewards lowering trunk by ~15 mm (phi ∈ [0.08, 0.24])
+    # Strictly gated on upright trunk (u_score) so falling/tipping onto heels earns 0.0.
     cfg.rewards["jump_crouch"] = RewardTermCfg(
         func=microduck_mdp.jump_crouch_depth,
-        weight=4.0,
+        weight=2.0,
         params={
             "crouch_start": 0.08,
             "crouch_end": 0.24,

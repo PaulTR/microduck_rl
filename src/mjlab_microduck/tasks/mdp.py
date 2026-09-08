@@ -7381,7 +7381,8 @@ def jump_crouch_depth(
 ) -> torch.Tensor:
     """Rewards lowering the trunk (crouch dip) during phi in [0.08, 0.24].
 
-    Zero reward if the robot stands still at nominal_z; dense linear positive reward as trunk drops.
+    Strictly gated on upright trunk posture: tipping backward onto heels or sitting
+    collapses reward to 0.0, preventing reward farming by collapsing/falling.
     """
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, crouch_start, crouch_end)
@@ -7389,7 +7390,13 @@ def jump_crouch_depth(
     origin_z = env.scene.env_origins[:, 2]
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=nominal_z)
     dip = nominal_z - z
-    return window * torch.clamp(dip / target_dip, min=0.0, max=1.5)
+
+    # Upright gating: prevents farming crouch reward by tipping backwards onto heels
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    u_score = torch.exp(-tilt_sq / (0.15**2))
+
+    return window * torch.clamp(dip / target_dip, min=0.0, max=1.5) * u_score
 
 
 def jump_push_velocity(
