@@ -340,7 +340,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=base_mdp.bad_orientation,
         params={
-            "limit_angle": 0.70,  # ~40 deg tilt limit (allows dynamic crouch & push, terminates fallen states)
+            "limit_angle": 0.85,  # ~48.7 deg tilt limit (allows dynamic crouch & push exploration, terminates fallen states)
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
     )

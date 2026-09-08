@@ -78,7 +78,7 @@ def test_jump_terminations():
 
     assert "time_out" in terms
     assert "fell_over" in terms
-    assert terms["fell_over"].params["limit_angle"] == 0.70  # ~40 degrees (allows crouch sway, catches fallen)
+    assert terms["fell_over"].params["limit_angle"] == 0.85  # ~48.7 degrees (allows crouch & launch sway, catches fallen)
     assert "butt_collapse" not in terms
     assert "nan_state" in terms
     assert terms["nan_state"].params.get("sensor_names") == ("feet_ground_contact",)
