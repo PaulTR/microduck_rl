@@ -72,15 +72,14 @@ def test_jump_rewards_and_penalties_signs():
 
 
 def test_jump_terminations():
-    """Verify terminations prevent fallen or exploding states."""
+    """Verify terminations prevent fallen or exploding states without blocking crouch."""
     cfg = make_microduck_jump_env_cfg()
     terms = cfg.terminations
 
     assert "time_out" in terms
     assert "fell_over" in terms
-    assert terms["fell_over"].params["limit_angle"] == 0.55  # ~31.5 degrees
-    assert "butt_collapse" in terms
-    assert terms["butt_collapse"].params["min_height"] == 0.082
+    assert terms["fell_over"].params["limit_angle"] == 0.70  # ~40 degrees (allows crouch sway, catches fallen)
+    assert "butt_collapse" not in terms
     assert "nan_state" in terms
     assert terms["nan_state"].params.get("sensor_names") == ("feet_ground_contact",)
 

@@ -340,13 +340,9 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     cfg.terminations["fell_over"] = TerminationTermCfg(
         func=base_mdp.bad_orientation,
         params={
-            "limit_angle": 0.55,  # ~31.5 deg tilt limit (prevents pitching back onto butt)
+            "limit_angle": 0.70,  # ~40 deg tilt limit (allows dynamic crouch & push, terminates fallen states)
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
-    )
-    cfg.terminations["butt_collapse"] = TerminationTermCfg(
-        func=microduck_mdp.root_height_below,
-        params={"min_height": 0.082},  # terminates if trunk drops below 8.2 cm (sitting on butt/collapsing)
     )
     cfg.terminations["nan_state"] = TerminationTermCfg(
         func=microduck_mdp.robot_state_is_nan,

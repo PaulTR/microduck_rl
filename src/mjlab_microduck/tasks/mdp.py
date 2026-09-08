@@ -7317,14 +7317,15 @@ def jump_reference_qpos(phase: torch.Tensor, default_pos: torch.Tensor) -> torch
 
     target_pos = default_pos.clone()
     # Left leg: hip_pitch (idx 2), knee (idx 3), ankle (idx 4)
-    target_pos[:, 2] += crouch_w[:, 0] * 0.10 - push_w[:, 0] * 0.08
+    # Hips stay centered over feet during push (no backward pitching)
+    target_pos[:, 2] += crouch_w[:, 0] * 0.05 + push_w[:, 0] * 0.02
     target_pos[:, 3] += -crouch_w[:, 0] * 0.35 + push_w[:, 0] * 0.05
-    target_pos[:, 4] += crouch_w[:, 0] * 0.10 - push_w[:, 0] * 0.10
+    target_pos[:, 4] += crouch_w[:, 0] * 0.05 - push_w[:, 0] * 0.02
 
     # Right leg (mirrored signs): hip_pitch (idx 11), knee (idx 12), ankle (idx 13)
-    target_pos[:, 11] += -crouch_w[:, 0] * 0.10 + push_w[:, 0] * 0.08
+    target_pos[:, 11] += -crouch_w[:, 0] * 0.05 - push_w[:, 0] * 0.02
     target_pos[:, 12] += crouch_w[:, 0] * 0.35 - push_w[:, 0] * 0.05
-    target_pos[:, 13] += -crouch_w[:, 0] * 0.10 + push_w[:, 0] * 0.10
+    target_pos[:, 13] += -crouch_w[:, 0] * 0.05 + push_w[:, 0] * 0.02
     return target_pos
 
 
