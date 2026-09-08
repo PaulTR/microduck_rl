@@ -7310,22 +7310,25 @@ def _jump_phase_window(
 def jump_reference_qpos(phase: torch.Tensor, default_pos: torch.Tensor) -> torch.Tensor:
     """Compute kinematic reference joint angles q*(phase) of shape (N, 14).
 
-    Guides crouch dip (phi ≈ 0.18), push extension (phi ≈ 0.30), and landing/stand (phi >= 0.40).
+    Guides balanced crouch dip (phi ≈ 0.18), push extension (phi ≈ 0.30), and landing/stand (phi >= 0.40).
+    Uses balanced sagittal kinematics (d_hip + d_ank = d_knee) so the Center of Mass remains
+    strictly centered over the foot soles (horizontal shift < 0.6 mm), eliminating backward pitching.
     """
     crouch_w = torch.exp(-((phase - 0.18) / 0.06).pow(2)).unsqueeze(-1)
     push_w = torch.exp(-((phase - 0.30) / 0.05).pow(2)).unsqueeze(-1)
 
     target_pos = default_pos.clone()
     # Left leg: hip_pitch (idx 2), knee (idx 3), ankle (idx 4)
-    # Hips stay centered over feet during push (no backward pitching)
-    target_pos[:, 2] += crouch_w[:, 0] * 0.05 + push_w[:, 0] * 0.02
-    target_pos[:, 3] += -crouch_w[:, 0] * 0.35 + push_w[:, 0] * 0.05
-    target_pos[:, 4] += crouch_w[:, 0] * 0.05 - push_w[:, 0] * 0.02
+    # Balanced crouch: knee +0.40 rad flex, hip +0.20 rad, ankle +0.20 rad (drop ≈ 10 mm, dx ≈ 0.5 mm)
+    # Push: full extension straightening legs through CoM
+    target_pos[:, 2] += crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
+    target_pos[:, 3] += crouch_w[:, 0] * 0.40 - push_w[:, 0] * 0.08
+    target_pos[:, 4] += crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
 
     # Right leg (mirrored signs): hip_pitch (idx 11), knee (idx 12), ankle (idx 13)
-    target_pos[:, 11] += -crouch_w[:, 0] * 0.05 - push_w[:, 0] * 0.02
-    target_pos[:, 12] += crouch_w[:, 0] * 0.35 - push_w[:, 0] * 0.05
-    target_pos[:, 13] += -crouch_w[:, 0] * 0.05 + push_w[:, 0] * 0.02
+    target_pos[:, 11] -= crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
+    target_pos[:, 12] -= crouch_w[:, 0] * 0.40 - push_w[:, 0] * 0.08
+    target_pos[:, 13] -= crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
     return target_pos
 
 

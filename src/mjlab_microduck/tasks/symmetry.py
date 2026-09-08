@@ -167,3 +167,83 @@ def microduck_vel_symmetry(
         aug_actions = torch.cat([actions, actions_sym], dim=0)
 
     return aug_obs, aug_actions
+
+
+# ---------------------------------------------------------------------------
+# Jump-specific symmetry (phase invariance)
+# ---------------------------------------------------------------------------
+
+# Jump phase is encoded as [cos(2πφ), sin(2πφ), 0] in the twist slots [48, 49, 50].
+# Under sagittal reflection, jump phase φ is time progress and identical for both legs;
+# therefore sin(2πφ) (slot 49) MUST NOT be negated. Negating it would invert phase to
+# (1 - φ), forcing the left leg at launch (φ ≈ 0.25) to mirror the right leg at
+# landing (1 - φ ≈ 0.75) and desynchronizing the feet.
+_JUMP_OBS_SIGN: list[float] = (
+    [-1.0, 1.0, -1.0]   # base_ang_vel: negate roll, yaw
+    + [1.0, -1.0, 1.0]  # projected_gravity: negate gy
+    + _JOINT_SIGN       # joint_pos
+    + _JOINT_SIGN       # joint_vel
+    + _JOINT_SIGN       # last_action
+    + [1.0, 1.0, -1.0]  # twist: jump phase [cos(2πφ), sin(2πφ), 0] is invariant under L-R reflection
+    + [1.0, 1.0, -1.0, -1.0]  # head: negate head_yaw, head_roll
+    + [1.0, -1.0, 1.0, -1.0, 1.0, -1.0]  # body: negate y, roll, yaw
+)
+
+_jump_cache: dict[torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_jump_tensors(
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if device not in _jump_cache:
+        obs_perm = torch.tensor(_OBS_PERM, dtype=torch.long, device=device)
+        obs_sign = torch.tensor(_JUMP_OBS_SIGN, dtype=torch.float32, device=device)
+        act_perm = torch.tensor(_JOINT_PERM, dtype=torch.long, device=device)
+        act_sign = torch.tensor(_JOINT_SIGN, dtype=torch.float32, device=device)
+        _jump_cache[device] = (obs_perm, obs_sign, act_perm, act_sign)
+    return _jump_cache[device]
+
+
+def microduck_jump_symmetry(
+    env,
+    obs: TensorDict | None,
+    actions: torch.Tensor | None,
+) -> tuple[TensorDict | None, torch.Tensor | None]:
+    """Bilateral symmetry augmentation / mirror function for vertical jump env.
+
+    Preserves phase φ so both feet are strictly synchronized under mirror loss.
+    """
+    aug_obs: TensorDict | None = None
+    aug_actions: torch.Tensor | None = None
+
+    if obs is not None:
+        actor_orig: torch.Tensor = obs["actor"]
+        obs_perm, obs_sign, _, _ = _get_jump_tensors(actor_orig.device)
+        actor_sym = actor_orig[:, obs_perm] * obs_sign
+
+        critic_orig: torch.Tensor = obs["critic"]
+        critic_repeated = torch.cat([critic_orig, critic_orig], dim=0)
+
+        aug_obs = TensorDict(
+            {
+                "actor": torch.cat([actor_orig, actor_sym], dim=0),
+                "critic": critic_repeated,
+            },
+            batch_size=[actor_orig.shape[0] * 2],
+            device=actor_orig.device,
+        )
+
+    if actions is not None:
+        _, _, act_perm, act_sign = _get_jump_tensors(actions.device)
+        actions_sym = actions[:, act_perm] * act_sign
+        aug_actions = torch.cat([actions, actions_sym], dim=0)
+
+    return aug_obs, aug_actions
+
+
+JUMP_SYMMETRY_CFG = {
+    "use_data_augmentation": False,
+    "use_mirror_loss": True,
+    "mirror_loss_coeff": 0.5,
+    "data_augmentation_func": "mjlab_microduck.tasks.symmetry.microduck_jump_symmetry",
+}

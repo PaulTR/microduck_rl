@@ -61,13 +61,26 @@ Open the wandb run to verify the policy is discovering the jump:
 - `Episode_Reward/head_posture`: near 0.0 (confirms NO chin-tucking or ball-curling).
 
 ### 6. Deployment Rehearsal & Testing
-Run the jump policy standalone with the BAM M6 actuator model:
+
+#### Download the Official Standing Policy (to catch the landing)
+Because `*.onnx` files are in `.gitignore`, download the official 61D standing policy directly:
 ```bash
-uv run scripts/infer_policy.py --jump <path_to_exported_policy.onnx> --new-cmd-obs
+curl -L -o alpha_stand.onnx https://huggingface.co/pollen-robotics/microduck-policies/resolve/main/alpha_stand.onnx
 ```
-**Interactive Controls:**
-- `J`: Trigger the vertical jump cycle from standing.
-- `X`: Reset the robot to default standing pose and trigger the jump.
+
+#### Run Jump with Standing Policy Handover
+```bash
+uv run scripts/infer_policy.py \
+    --jump <path_to_exported_policy.onnx> \
+    --standing alpha_stand.onnx \
+    --new-cmd-obs
+```
+
+**Interactive Controls & Workflow:**
+- The robot spawns balancing stably in the standing policy (`alpha_stand.onnx`).
+- `J`: Trigger the two-legged vertical jump. Control hands to `--jump`.
+- At touchdown / end of jump cycle (1.2 s), control automatically hands back to `--standing` to catch the landing and stabilize upright.
+- `X`: Reset robot to default standing pose.
 - `Space`: Zero commands.
 - `Q`: Quit viewer.
 

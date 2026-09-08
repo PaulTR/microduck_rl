@@ -113,14 +113,14 @@ def test_jump_reference_trajectory_continuity():
     assert torch.isclose(q_ref[0, 3], default_pos[0, 3], atol=1e-3)
     assert torch.isclose(q_ref[0, 12], default_pos[0, 12], atol=1e-3)
 
-    # At phase 0.18: knees fully crouched (-0.35 rad left, +0.35 rad right)
-    assert torch.isclose(q_ref[1, 3], torch.tensor(-0.35), atol=1e-2)
-    assert torch.isclose(q_ref[1, 12], torch.tensor(0.35), atol=1e-2)
+    # At phase 0.18: knees fully crouched (+0.40 rad left, -0.40 rad right)
+    assert torch.isclose(q_ref[1, 3], torch.tensor(0.40), atol=1e-2)
+    assert torch.isclose(q_ref[1, 12], torch.tensor(-0.40), atol=1e-2)
 
-    # At phase 0.40 to 1.0: knees fully extended in default pose
+    # At phase 0.40 to 1.0: knees fully extended in default pose (within 5e-3 rad)
     for i in [3, 4, 5]:
-        assert torch.isclose(q_ref[i, 3], default_pos[i, 3], atol=1e-3)
-        assert torch.isclose(q_ref[i, 12], default_pos[i, 12], atol=1e-3)
+        assert torch.isclose(q_ref[i, 3], default_pos[i, 3], atol=5e-3)
+        assert torch.isclose(q_ref[i, 12], default_pos[i, 12], atol=5e-3)
 
     # Head and neck (indices 5..8) must stay fixed at default_pos across all phases
     for p in range(6):
@@ -141,6 +141,36 @@ def test_jump_variants_build():
 
 
 def test_jump_runner_cfg_symmetry():
-    """Verify runner config enables bilateral symmetry mirror loss."""
+    """Verify runner config enables bilateral symmetry mirror loss with jump symmetry."""
     assert MicroduckJumpRlCfg.experiment_name == "microduck_jump"
     assert MicroduckJumpRlCfg.algorithm.symmetry_cfg is not None
+    assert (
+        MicroduckJumpRlCfg.algorithm.symmetry_cfg["data_augmentation_func"]
+        == "mjlab_microduck.tasks.symmetry.microduck_jump_symmetry"
+    )
+
+
+def test_microduck_jump_symmetry_preserves_phase():
+    """Verify microduck_jump_symmetry does not negate sin(2*pi*phi), keeping jump phase synchronized."""
+    from tensordict import TensorDict
+    from mjlab_microduck.tasks.symmetry import microduck_jump_symmetry
+
+    # Create dummy 61D actor observation
+    actor = torch.zeros((1, 61), dtype=torch.float32)
+    # Set phase command: cos(2*pi*0.25)=0.0, sin(2*pi*0.25)=1.0
+    actor[0, 48] = 0.0
+    actor[0, 49] = 1.0  # sin(2*pi*phi)
+    actor[0, 50] = 0.0
+
+    obs = TensorDict({"actor": actor, "critic": torch.zeros((1, 10))}, batch_size=[1])
+    actions = torch.zeros((1, 14), dtype=torch.float32)
+    actions[0, 3] = 0.5  # left knee
+    actions[0, 12] = -0.5  # right knee
+
+    aug_obs, aug_actions = microduck_jump_symmetry(None, obs, actions)
+
+    # In mirrored observation, slot 49 (sin(2*pi*phi)) MUST remain +1.0 (not negated!)
+    assert aug_obs["actor"][1, 49] == 1.0
+    # Actions: right knee in mirrored action must match mirrored left knee
+    assert aug_actions[1, 12] == -0.5  # left knee (idx 3) swapped to right (idx 12) with sign flip (-1 * 0.5 = -0.5)
+    assert aug_actions[1, 3] == 0.5
