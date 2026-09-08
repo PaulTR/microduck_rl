@@ -42,8 +42,8 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 # Episode duration and targets
 EPISODE_LENGTH_S = 1.2
 STAND_Z          = 0.114
-CROUCH_Z         = 0.100
-APEX_Z           = 0.150
+CROUCH_Z         = 0.104
+APEX_Z           = 0.145
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 import mjlab.envs.mdp as base_mdp
@@ -128,65 +128,65 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         if name in cfg.rewards:
             del cfg.rewards[name]
 
-    # ── Rewards: 4-Phase Biomechanical Jump Cycle ─────────────────────────────
-    # 1. Kinematic reference trajectory tracking: active during crouch & push (phi in [0.06, 0.38])
-    # and landing extension (phi in [0.38, 0.95] gated on lift_gate).
-    # std=0.25 gives a broad, dense gradient from step 0 guiding symmetric, balanced crouch & extension.
+    # ── Rewards: 4-Stage Crouch-Push-Tuck Jump Cycle ──────────────────────────
+    # 1. Kinematic reference trajectory tracking: active during crouch, push, and mid-air tuck
+    # (phi in [0.06, 0.50]) and landing extension (phi in [0.50, 0.95] gated on lift_gate).
+    # std=0.25 gives a broad, dense gradient from step 0 guiding symmetric, balanced motion.
     cfg.rewards["jump_trajectory_tracking"] = RewardTermCfg(
         func=microduck_mdp.jump_trajectory_tracking,
         weight=6.0,
         params={
             "std": 0.25,
             "window_start": 0.06,
-            "window_end": 0.38,
+            "window_end": 0.50,
             "command_name": "twist",
         },
     )
 
-    # 1b. Supplemental crouch dip bonus: rewards lowering trunk by ~15 mm (phi ∈ [0.08, 0.24])
+    # 1b. Supplemental crouch dip bonus: rewards lowering trunk by ~10 mm (phi ∈ [0.08, 0.24])
     # Strictly gated on upright trunk (u_score) so falling/tipping onto heels earns 0.0.
     cfg.rewards["jump_crouch"] = RewardTermCfg(
         func=microduck_mdp.jump_crouch_depth,
-        weight=2.0,
+        weight=4.0,
         params={
             "crouch_start": 0.08,
             "crouch_end": 0.24,
             "nominal_z": STAND_Z,
-            "target_dip": 0.015,
+            "target_dip": 0.010,
             "command_name": "twist",
         },
     )
 
-    # 2. Push-off vertical velocity: positive vz > 0 during explosive extension (phi ∈ [0.20, 0.38])
-    # Standing still (vz <= 0) earns strictly 0.0.
+    # 2. Push-off vertical velocity: positive vz > 0 during explosive extension (phi ∈ [0.22, 0.34])
+    # Steep gradient target_vz = 0.45 m/s with clamp up to 2.5 pulls policy to drive hard into floor.
     cfg.rewards["jump_push_velocity"] = RewardTermCfg(
         func=microduck_mdp.jump_push_velocity,
-        weight=10.0,
+        weight=12.0,
         params={
-            "push_start": 0.20,
-            "push_end": 0.38,
-            "target_vz": 0.40,
+            "push_start": 0.22,
+            "push_end": 0.34,
+            "target_vz": 0.45,
             "command_name": "twist",
         },
     )
 
-    # 3. Airborne flight: trunk height above ground (phi ∈ [0.30, 0.65]), scaled by apex lift height
-    # Requires z > 0.126 m (1.2 cm above settled stand). Standing still earns strictly 0.0.
+    # 3. Airborne flight: trunk height above ground (phi ∈ [0.30, 0.52]), scaled by apex lift height
+    # Strictly requires both feet off ground (both_airborne > 0). Grounded robot earns strictly 0.0.
     cfg.rewards["jump_airborne"] = RewardTermCfg(
         func=microduck_mdp.jump_airborne,
-        weight=10.0,
+        weight=12.0,
         params={
             "sensor_name": feet_ground_cfg.name,
             "flight_start": 0.30,
-            "flight_end": 0.65,
-            "min_flight_height": 0.126,
+            "flight_end": 0.52,
+            "min_flight_height": 0.118,
             "target_apex": APEX_Z,
             "command_name": "twist",
         },
     )
 
-    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.40, 0.05] wrap), GATED on having jumped
-    # lift_gate requires max_z > 0.120 m during flight. Standing still earns strictly 0.0.
+    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.50, 0.05] wrap), GATED on having jumped
+    # Requires having achieved airborne flight. Grounded robot earns strictly 0.0.
     cfg.rewards["jump_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_stand_composite,
         weight=6.0,
@@ -195,7 +195,7 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
             "height_std": 0.025,
             "upright_std": 0.25,
             "pose_std": 0.35,
-            "stand_start": 0.40,
+            "stand_start": 0.50,
             "stand_end": 0.05,
             "sensor_name": feet_ground_cfg.name,
             "command_name": "twist",
@@ -206,32 +206,32 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
     # 5. Head posture penalty: locks servos 5–8 to HOME pose to eliminate head curling and bobbing
     cfg.rewards["head_posture"] = RewardTermCfg(
         func=microduck_mdp.head_posture_penalty,
-        weight=-6.0,
+        weight=-3.0,
     )
 
     # 6. Anti-spin penalty: penalize yaw angular velocity (ω_z²)
     cfg.rewards["jump_yaw_rate"] = RewardTermCfg(
         func=microduck_mdp.jump_yaw_rate_penalty,
-        weight=-1.5,
+        weight=-0.6,
     )
 
     # 7. In-place constraint: strictly penalize horizontal velocity (vx² + vy²)
     cfg.rewards["jump_horizontal_vel"] = RewardTermCfg(
         func=microduck_mdp.jump_horizontal_velocity_penalty,
-        weight=-3.0,
+        weight=-2.0,
     )
 
     # 8. Verticality penalty: keep body vertical (gx² + gy²)
     cfg.rewards["jump_verticality"] = RewardTermCfg(
         func=microduck_mdp.jump_verticality_penalty,
-        weight=-12.0,
+        weight=-8.0,
     )
 
     # ── Sim2real regularisers ─────────────────────────────────────────────────
     # Keep action_rate_l2 low so explosive push-off is not penalized during exploration
     cfg.rewards["action_rate_l2"] = RewardTermCfg(
         func=mdp.action_rate_l2,
-        weight=-0.0005,
+        weight=-0.0002,
     )
     cfg.rewards["self_collisions"] = RewardTermCfg(
         func=mdp.self_collision_cost,
@@ -453,8 +453,8 @@ MicroduckJumpRlCfg = RslRlOnPolicyRunnerCfg(
     num_steps_per_env=24,
     max_iterations=1200,
     save_interval=100,
-    experiment_name="microduck_jump",
-    run_name="microduck_jump",
+    experiment_name="microduck_jump_tuck",
+    run_name="microduck_jump_tuck",
     wandb_project="mjlab_microduck",
     actor=RslRlModelCfg(
         hidden_dims=(512, 256, 128),

@@ -7310,53 +7310,60 @@ def _jump_phase_window(
 def jump_reference_qpos(phase: torch.Tensor, default_pos: torch.Tensor) -> torch.Tensor:
     """Compute kinematic reference joint angles q*(phase) of shape (N, 14).
 
-    Guides balanced crouch dip (phi ≈ 0.18), push extension (phi ≈ 0.30), and landing/stand (phi >= 0.40).
-    Uses balanced sagittal kinematics (d_hip + d_ank = d_knee) so the Center of Mass remains
-    strictly centered over the foot soles (horizontal shift < 0.6 mm), eliminating backward pitching.
+    4-Stage Crouch-Push-Tuck Jump Cycle:
+    1. Pre-crouch (phi ≈ 0.18): Knees flex +0.36 rad, hips +0.18 rad, ankles +0.18 rad (dip ~9 mm, vz=0).
+    2. Explosive push (phi ≈ 0.28): Knees extend -0.12 rad, hips -0.06 rad, ankles -0.06 rad through CoM.
+    3. Mid-air tuck (phi ≈ 0.40): Knees flex +0.40 rad, hips +0.20 rad, ankles +0.20 rad (tucking feet up).
+    4. Landing reach & stand (phi >= 0.52): Smooth return to HOME stand pose for flat-footed landing.
+
+    Balanced sagittal kinematics (d_hip + d_ank = d_knee) keeps CoM centered over feet (dx < 0.7 mm).
     """
-    crouch_w = torch.exp(-((phase - 0.18) / 0.06).pow(2)).unsqueeze(-1)
-    push_w = torch.exp(-((phase - 0.30) / 0.05).pow(2)).unsqueeze(-1)
+    crouch_w = torch.exp(-((phase - 0.18) / 0.07).pow(2)).unsqueeze(-1)
+    push_w = torch.exp(-((phase - 0.28) / 0.04).pow(2)).unsqueeze(-1)
+    tuck_w = torch.exp(-((phase - 0.40) / 0.06).pow(2)).unsqueeze(-1)
+
+    d_knee = crouch_w[:, 0] * 0.36 - push_w[:, 0] * 0.12 + tuck_w[:, 0] * 0.40
+    d_hip  = crouch_w[:, 0] * 0.18 - push_w[:, 0] * 0.06 + tuck_w[:, 0] * 0.20
+    d_ank  = crouch_w[:, 0] * 0.18 - push_w[:, 0] * 0.06 + tuck_w[:, 0] * 0.20
 
     target_pos = default_pos.clone()
     # Left leg: hip_pitch (idx 2), knee (idx 3), ankle (idx 4)
-    # Balanced crouch: knee +0.40 rad flex, hip +0.20 rad, ankle +0.20 rad (drop ≈ 10 mm, dx ≈ 0.5 mm)
-    # Push: full extension straightening legs through CoM
-    target_pos[:, 2] += crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
-    target_pos[:, 3] += crouch_w[:, 0] * 0.40 - push_w[:, 0] * 0.08
-    target_pos[:, 4] += crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
+    target_pos[:, 2] += d_hip
+    target_pos[:, 3] += d_knee
+    target_pos[:, 4] += d_ank
 
     # Right leg (mirrored signs): hip_pitch (idx 11), knee (idx 12), ankle (idx 13)
-    target_pos[:, 11] -= crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
-    target_pos[:, 12] -= crouch_w[:, 0] * 0.40 - push_w[:, 0] * 0.08
-    target_pos[:, 13] -= crouch_w[:, 0] * 0.20 - push_w[:, 0] * 0.04
+    target_pos[:, 11] -= d_hip
+    target_pos[:, 12] -= d_knee
+    target_pos[:, 13] -= d_ank
     return target_pos
 
 
 def jump_trajectory_tracking(
     env: ManagerBasedRlEnv,
-    std: float = 0.12,
+    std: float = 0.25,
     window_start: float = 0.06,
-    window_end: float = 0.38,
+    window_end: float = 0.50,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Dense Gaussian tracking of leg pitch angles across crouch, push, and landing extension.
+    """Dense Gaussian tracking of leg pitch angles across crouch, push, tuck, and landing extension.
 
-    - phi in [0.06, 0.38]: Active unconditionally (standing still has ~0.35 rad knee error, earns ~0).
-    - phi in [0.38, 0.95]: Active ONLY IF lift_gate > 0 (robot jumped), commanding extended legs for touchdown.
+    - phi in [0.06, 0.50]: Active unconditionally (guides crouch, push, and mid-air tuck).
+    - phi in [0.50, 0.95]: Active ONLY IF lift_gate > 0 (robot jumped), commanding extended legs for touchdown.
     """
     phase = jump_phase_from_command(env, command_name)  # (N,)
     asset: Entity = env.scene[asset_cfg.name]
     origin_z = env.scene.env_origins[:, 2]
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
-    # Gate for flight/landing phase (phi > 0.38): requires actual jump lift
+    # Gate for landing phase (phi > 0.50): requires actual jump lift
     max_z = getattr(env, "_jump_max_z", z)
     lift_gate = torch.clamp((max_z - 0.120) / 0.008, min=0.0, max=1.0)
 
-    w_push = _jump_phase_window(phase, window_start, window_end)
-    w_land = _jump_phase_window(phase, 0.38, 0.95) * lift_gate
-    w_total = torch.clamp(w_push + w_land, min=0.0, max=1.0)
+    w_jump = _jump_phase_window(phase, window_start, window_end)
+    w_land = _jump_phase_window(phase, 0.50, 0.95) * lift_gate
+    w_total = torch.clamp(w_jump + w_land, min=0.0, max=1.0)
 
     joint_pos = _servo_joint_pos(env, asset)            # (N, 14)
     default_pos = _servo_default_joint_pos(env, asset)  # (N, 14)
@@ -7375,7 +7382,7 @@ def jump_crouch_depth(
     crouch_start: float = 0.08,
     crouch_end: float = 0.24,
     nominal_z: float = 0.114,
-    target_dip: float = 0.015,
+    target_dip: float = 0.010,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7394,16 +7401,16 @@ def jump_crouch_depth(
     # Upright gating: prevents farming crouch reward by tipping backwards onto heels
     g = asset.data.projected_gravity_b
     tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
-    u_score = torch.exp(-tilt_sq / (0.15**2))
+    u_score = torch.exp(-tilt_sq / (0.25**2))
 
     return window * torch.clamp(dip / target_dip, min=0.0, max=1.5) * u_score
 
 
 def jump_push_velocity(
     env: ManagerBasedRlEnv,
-    push_start: float = 0.20,
-    push_end: float = 0.38,
-    target_vz: float = 0.40,
+    push_start: float = 0.22,
+    push_end: float = 0.34,
+    target_vz: float = 0.45,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7415,11 +7422,11 @@ def jump_push_velocity(
     # Must be upright during push: prevents pitching back into a backflip / butt landing
     g = asset.data.projected_gravity_b
     tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
-    u_score = torch.exp(-tilt_sq / (0.20**2))
+    u_score = torch.exp(-tilt_sq / (0.25**2))
 
     v_w = asset.data.root_link_lin_vel_w
     vz = torch.nan_to_num(v_w[:, 2], nan=0.0)
-    return window * torch.clamp(vz / target_vz, min=0.0, max=2.0) * u_score
+    return window * torch.clamp(vz / target_vz, min=0.0, max=2.5) * u_score
 
 
 def reset_jump_state(
@@ -7432,54 +7439,70 @@ def reset_jump_state(
         env_ids = torch.arange(env.num_envs, device=env.device)
     if not hasattr(env, "_jump_max_z") or env._jump_max_z.shape[0] != env.num_envs:
         env._jump_max_z = torch.zeros(env.num_envs, device=env.device)
+    if not hasattr(env, "_jump_achieved_airborne") or env._jump_achieved_airborne.shape[0] != env.num_envs:
+        env._jump_achieved_airborne = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     env._jump_max_z[env_ids] = 0.0
+    env._jump_achieved_airborne[env_ids] = False
 
 
 def jump_airborne(
     env: ManagerBasedRlEnv,
     sensor_name: str = "feet_ground_contact",
     flight_start: float = 0.30,
-    flight_end: float = 0.65,
-    min_flight_height: float = 0.126,
-    target_apex: float = JUMP_TARGET_APEX_Z,
+    flight_end: float = 0.52,
+    min_flight_height: float = 0.118,
+    target_apex: float = 0.145,
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Rewards apex flight height during flight window. Gated on upright trunk!"""
+    """Rewards apex flight height during flight window. Strictly requires feet breaking contact!"""
     phase = jump_phase_from_command(env, command_name)
     window = _jump_phase_window(phase, flight_start, flight_end)
     asset: Entity = env.scene[asset_cfg.name]
     origin_z = env.scene.env_origins[:, 2]
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
-    # Track maximum height achieved strictly during push & flight (phi in [0.22, 0.65])
-    if hasattr(env, "_jump_max_z"):
-        in_jump = (phase >= 0.22) & (phase <= 0.65)
-        env._jump_max_z = torch.where(
-            in_jump,
-            torch.maximum(env._jump_max_z, z),
-            env._jump_max_z,
-        )
-
-    # Uprightness factor: MUST be upright to earn flight reward (prevents butt-landing / back-flop farming)
-    g = asset.data.projected_gravity_b
-    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
-    u_score = torch.exp(-tilt_sq / (0.20**2))
-
-    # Continuous lift scaling above standing height (0.126 m is 1.2 cm above settled stand)
-    lift = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=2.0)
-
-    # Bonus if feet break contact — ONLY paid if trunk is upright!
-    bonus = 1.0
+    # Check foot contacts
+    both_airborne = torch.zeros(env.num_envs, device=env.device)
     if sensor_name in env.scene.sensors:
         sensor = env.scene.sensors[sensor_name]
         found = sensor.data.found
         if found is not None and found.dim() > 1 and found.shape[-1] >= 2:
             contacts = found.view(found.shape[0], -1)[:, :2] > 0
             both_airborne = (~contacts[:, 0] & ~contacts[:, 1]).float()
-            bonus = 1.0 + 1.0 * (both_airborne * (u_score > 0.5).float())
 
-    return window * lift * bonus * u_score
+    # Uprightness factor: MUST be upright to earn flight reward (prevents butt-landing / back-flop farming)
+    g = asset.data.projected_gravity_b
+    tilt_sq = g[:, 0].pow(2) + g[:, 1].pow(2)
+    u_score = torch.exp(-tilt_sq / (0.25**2))
+
+    # Track maximum height achieved strictly during push & flight
+    if hasattr(env, "_jump_max_z"):
+        in_jump = (phase >= 0.22) & (phase <= 0.55)
+        env._jump_max_z = torch.where(
+            in_jump,
+            torch.maximum(env._jump_max_z, z),
+            env._jump_max_z,
+        )
+
+    # Latch airborne achievement for jump_stand gating
+    if hasattr(env, "_jump_achieved_airborne"):
+        in_flight = (phase >= flight_start) & (phase <= flight_end)
+        env._jump_achieved_airborne = torch.where(
+            in_flight & (both_airborne > 0.5) & (u_score > 0.4),
+            torch.ones_like(env._jump_achieved_airborne),
+            env._jump_achieved_airborne,
+        )
+
+    # Continuous lift scaling above standing height (0.118 m is 4 mm above settled stand)
+    lift = torch.clamp((z - min_flight_height) / max(target_apex - min_flight_height, 1e-4), min=0.0, max=2.0)
+
+    # Reward airborne: requires feet to actually break contact!
+    # Direct reward for being in the air (both_airborne) + height bonus (both_airborne * lift)
+    # A robot with feet on the ground earns strictly 0.0!
+    air_reward = both_airborne * (1.0 + 1.5 * lift) * u_score
+
+    return window * air_reward
 
 
 def jump_stand_composite(
@@ -7488,7 +7511,7 @@ def jump_stand_composite(
     height_std: float = 0.025,
     upright_std: float = 0.25,
     pose_std: float = 0.35,
-    stand_start: float = 0.40,
+    stand_start: float = 0.50,
     stand_end: float = 0.05,
     sensor_name: str = "feet_ground_contact",
     command_name: str = "twist",
@@ -7501,10 +7524,11 @@ def jump_stand_composite(
     origin_z = env.scene.env_origins[:, 2]
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
-    # Gate: only reward stand if the robot actually achieved lift during the jump window
-    # min 0.120 m (6 mm above settled stand 0.114 m) prevents idle farming while enabling learning
+    # Gate: only reward stand if the robot actually achieved airborne flight or substantial lift
+    air_achieved = getattr(env, "_jump_achieved_airborne", torch.ones(env.num_envs, dtype=torch.bool, device=env.device)).float()
     max_z = getattr(env, "_jump_max_z", z)
-    lift_gate = torch.clamp((max_z - 0.120) / 0.008, min=0.0, max=1.0)
+    height_gate = torch.clamp((max_z - 0.122) / 0.006, min=0.0, max=1.0)
+    jump_gate = torch.maximum(air_achieved, height_gate)
 
     h_score = torch.exp(-((z - target_height) / height_std).pow(2))
     g = asset.data.projected_gravity_b
@@ -7528,7 +7552,7 @@ def jump_stand_composite(
     # 0.35 upright + 0.25 height + 0.20 pose + 0.20 feet contact
     stand_quality = 0.35 * u_score + 0.25 * h_score + 0.20 * p_score + 0.20 * contact_bonus
 
-    return window * lift_gate * stand_quality
+    return window * jump_gate * stand_quality
 
 
 def head_posture_penalty(

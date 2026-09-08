@@ -61,7 +61,7 @@ def test_jump_rewards_and_penalties_signs():
     assert "jump_push_velocity" in r and r["jump_push_velocity"].weight > 0
     assert "jump_airborne" in r and r["jump_airborne"].weight > 0
     assert "jump_stand" in r and r["jump_stand"].weight > 0
-    assert r["jump_stand"].params["stand_start"] == 0.40
+    assert r["jump_stand"].params["stand_start"] == 0.50
 
     # Penalties (must be negative)
     assert "action_rate_l2" in r and r["action_rate_l2"].weight < 0
@@ -97,7 +97,7 @@ def test_jump_obs_nan_sanitization():
 
 def test_jump_reference_trajectory_continuity():
     """Verify kinematic reference trajectory: smooth crouch, rapid extension, extended landing/stand."""
-    phases = torch.tensor([0.0, 0.18, 0.30, 0.40, 0.60, 1.0], dtype=torch.float32)
+    phases = torch.tensor([0.0, 0.18, 0.28, 0.40, 0.60, 1.0], dtype=torch.float32)
     default_pos = torch.zeros((len(phases), 14), dtype=torch.float32)
     # Set nominal head angles
     default_pos[:, 5] = 0.3491  # neck_pitch
@@ -113,12 +113,16 @@ def test_jump_reference_trajectory_continuity():
     assert torch.isclose(q_ref[0, 3], default_pos[0, 3], atol=1e-3)
     assert torch.isclose(q_ref[0, 12], default_pos[0, 12], atol=1e-3)
 
-    # At phase 0.18: knees fully crouched (+0.40 rad left, -0.40 rad right)
-    assert torch.isclose(q_ref[1, 3], torch.tensor(0.40), atol=1e-2)
-    assert torch.isclose(q_ref[1, 12], torch.tensor(-0.40), atol=1e-2)
+    # At phase 0.18: knees crouched (+0.36 rad left, -0.36 rad right)
+    assert torch.isclose(q_ref[1, 3], torch.tensor(0.36), atol=1e-2)
+    assert torch.isclose(q_ref[1, 12], torch.tensor(-0.36), atol=1e-2)
 
-    # At phase 0.40 to 1.0: knees fully extended in default pose (within 5e-3 rad)
-    for i in [3, 4, 5]:
+    # At phase 0.40: knees tucked (+0.40 rad left, -0.40 rad right)
+    assert torch.isclose(q_ref[3, 3], torch.tensor(0.40), atol=1e-2)
+    assert torch.isclose(q_ref[3, 12], torch.tensor(-0.40), atol=1e-2)
+
+    # At phase 0.60 to 1.0: knees fully extended in default pose (within 5e-3 rad)
+    for i in [4, 5]:
         assert torch.isclose(q_ref[i, 3], default_pos[i, 3], atol=5e-3)
         assert torch.isclose(q_ref[i, 12], default_pos[i, 12], atol=5e-3)
 
@@ -142,7 +146,7 @@ def test_jump_variants_build():
 
 def test_jump_runner_cfg_symmetry():
     """Verify runner config enables bilateral symmetry mirror loss with jump symmetry."""
-    assert MicroduckJumpRlCfg.experiment_name == "microduck_jump"
+    assert MicroduckJumpRlCfg.experiment_name == "microduck_jump_tuck"
     assert MicroduckJumpRlCfg.algorithm.symmetry_cfg is not None
     assert (
         MicroduckJumpRlCfg.algorithm.symmetry_cfg["data_augmentation_func"]
