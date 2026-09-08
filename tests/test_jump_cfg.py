@@ -61,7 +61,7 @@ def test_jump_rewards_and_penalties_signs():
     assert "jump_push_velocity" in r and r["jump_push_velocity"].weight > 0
     assert "jump_airborne" in r and r["jump_airborne"].weight > 0
     assert "jump_stand" in r and r["jump_stand"].weight > 0
-    assert r["jump_stand"].params["stand_start"] == 0.50
+    assert r["jump_stand"].params["stand_start"] == 0.40
 
     # Penalties (must be negative)
     assert "action_rate_l2" in r and r["action_rate_l2"].weight < 0

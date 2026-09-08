@@ -184,18 +184,19 @@ def make_microduck_jump_env_cfg(play: bool = False, rough: bool = False) -> Mana
         },
     )
 
-    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.50, 0.05] wrap), GATED on having jumped
-    # lift_gate requires max_z > 0.126 m during flight. Standing still earns strictly 0.0.
+    # 4. Landing & stand recovery: upright HOME stand (phi ∈ [0.40, 0.05] wrap), GATED on having jumped
+    # lift_gate requires max_z > 0.120 m during flight. Standing still earns strictly 0.0.
     cfg.rewards["jump_stand"] = RewardTermCfg(
         func=microduck_mdp.jump_stand_composite,
         weight=6.0,
         params={
             "target_height": STAND_Z,
-            "height_std": 0.020,
-            "upright_std": 0.15,
-            "pose_std": 0.30,
-            "stand_start": 0.50,
+            "height_std": 0.025,
+            "upright_std": 0.25,
+            "pose_std": 0.35,
+            "stand_start": 0.40,
             "stand_end": 0.05,
+            "sensor_name": feet_ground_cfg.name,
             "command_name": "twist",
         },
     )

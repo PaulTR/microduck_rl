@@ -7462,11 +7462,12 @@ def jump_airborne(
 def jump_stand_composite(
     env: ManagerBasedRlEnv,
     target_height: float = 0.114,
-    height_std: float = 0.020,
-    upright_std: float = 0.15,
-    pose_std: float = 0.30,
-    stand_start: float = 0.50,
+    height_std: float = 0.025,
+    upright_std: float = 0.25,
+    pose_std: float = 0.35,
+    stand_start: float = 0.40,
     stand_end: float = 0.05,
+    sensor_name: str = "feet_ground_contact",
     command_name: str = "twist",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
@@ -7478,8 +7479,9 @@ def jump_stand_composite(
     z = torch.nan_to_num(asset.data.root_link_pos_w[:, 2] - origin_z, nan=0.0)
 
     # Gate: only reward stand if the robot actually achieved lift during the jump window
+    # min 0.120 m (6 mm above settled stand 0.114 m) prevents idle farming while enabling learning
     max_z = getattr(env, "_jump_max_z", z)
-    lift_gate = torch.clamp((max_z - 0.126) / 0.010, min=0.0, max=1.0)
+    lift_gate = torch.clamp((max_z - 0.120) / 0.008, min=0.0, max=1.0)
 
     h_score = torch.exp(-((z - target_height) / height_std).pow(2))
     g = asset.data.projected_gravity_b
@@ -7490,7 +7492,20 @@ def jump_stand_composite(
     default_pos = _servo_default_joint_pos(env, asset)
     p_score = torch.exp(-((joint_pos - default_pos) / pose_std).pow(2)).mean(dim=-1)
 
-    return window * lift_gate * (h_score * u_score * p_score)
+    # Both feet grounded bonus during landing
+    contact_bonus = torch.zeros(env.num_envs, device=env.device)
+    if sensor_name in env.scene.sensors:
+        sensor = env.scene.sensors[sensor_name]
+        found = sensor.data.found
+        if found is not None and found.dim() > 1 and found.shape[-1] >= 2:
+            contacts = found.view(found.shape[0], -1)[:, :2] > 0
+            contact_bonus = (contacts[:, 0] & contacts[:, 1]).float()
+
+    # Additive blend ensures non-zero gradient across all landing dimensions:
+    # 0.35 upright + 0.25 height + 0.20 pose + 0.20 feet contact
+    stand_quality = 0.35 * u_score + 0.25 * h_score + 0.20 * p_score + 0.20 * contact_bonus
+
+    return window * lift_gate * stand_quality
 
 
 def head_posture_penalty(
